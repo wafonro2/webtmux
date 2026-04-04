@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
+
+URL="http://localhost:5173"
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: npm is not installed or not in PATH." >&2
+  exit 1
+fi
+
+npm run dev &
+DEV_PID=$!
+
+cleanup() {
+  if kill -0 "$DEV_PID" >/dev/null 2>&1; then
+    kill "$DEV_PID" >/dev/null 2>&1 || true
+    wait "$DEV_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+echo "Waiting for dev server at $URL ..."
+for _ in $(seq 1 120); do
+  if curl -fsS "$URL" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$URL" >/dev/null 2>&1 || true
+else
+  echo "xdg-open not found. Open this URL manually: $URL"
+fi
+
+wait "$DEV_PID"
