@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_NAME="${1:-webtmux.service}"
+
+cd "$APP_DIR"
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: npm is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "Error: systemctl is not available on this machine." >&2
+  exit 1
+fi
+
+echo "Installing dependencies (if needed)..."
+npm install
+
+echo "Building app..."
+npm run build
+
+echo "Restarting ${SERVICE_NAME}..."
+sudo systemctl restart "${SERVICE_NAME}"
+
+echo
+sudo systemctl --no-pager --full status "${SERVICE_NAME}" | sed -n '1,20p'

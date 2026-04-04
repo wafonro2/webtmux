@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import express from 'express';
 import cors from 'cors';
@@ -13,9 +14,113 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 const SESSION_PREFIX = 'webtmux-';
+const AUTH_COOKIE_NAME = 'webtmux_auth';
+const DEFAULT_PASSWORD = 'changeme';
+const AUTH_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
+const configuredPassword = process.env.WEBTMUX_PASSWORD || DEFAULT_PASSWORD;
+if (!process.env.WEBTMUX_PASSWORD) {
+  console.warn(
+    '[webtmux] WEBTMUX_PASSWORD is not set; using default password "changeme".'
+  );
+}
+
+const authTokens = new Set();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+function parseCookies(cookieHeader) {
+  if (!cookieHeader) {
+    return {};
+  }
+
+  return cookieHeader
+    .split(';')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .reduce((acc, segment) => {
+      const index = segment.indexOf('=');
+      if (index <= 0) {
+        return acc;
+      }
+
+      const key = segment.slice(0, index);
+      const value = decodeURIComponent(segment.slice(index + 1));
+      acc[key] = value;
+      return acc;
+    }, {});
+}
+
+function readAuthToken(cookieHeader) {
+  const cookies = parseCookies(cookieHeader);
+  return cookies[AUTH_COOKIE_NAME] || null;
+}
+
+function isAuthenticatedCookie(cookieHeader) {
+  const token = readAuthToken(cookieHeader);
+  return Boolean(token && authTokens.has(token));
+}
+
+function isAuthenticatedRequest(req) {
+  return isAuthenticatedCookie(req.headers.cookie);
+}
+
+function clearAuthCookie(res) {
+  const secure = process.env.WEBTMUX_COOKIE_SECURE === '1';
+  const cookie = [
+    `${AUTH_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    'Max-Age=0'
+  ];
+
+  if (secure) {
+    cookie.push('Secure');
+  }
+
+  res.setHeader('Set-Cookie', cookie.join('; '));
+}
+
+function setAuthCookie(res, token) {
+  const secure = process.env.WEBTMUX_COOKIE_SECURE === '1';
+  const cookie = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${AUTH_TOKEN_MAX_AGE_SECONDS}`
+  ];
+
+  if (secure) {
+    cookie.push('Secure');
+  }
+
+  res.setHeader('Set-Cookie', cookie.join('; '));
+}
+
+function passwordsMatch(candidateInput) {
+  const candidate = typeof candidateInput === 'string' ? candidateInput : '';
+  const expectedBuffer = Buffer.from(configuredPassword);
+  const providedBuffer = Buffer.from(candidate);
+
+  if (expectedBuffer.length !== providedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+}
+
+function requireAuth(req, res, next) {
+  if (!isAuthenticatedRequest(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  next();
+}
 
 function runTmux(args, options = {}) {
   const result = spawnSync('tmux', args, {
@@ -60,9 +165,10 @@ function listTmuxSessions() {
     .filter(Boolean)
     .map((line) => {
       const [name, created] = line.split('|');
-      const createdAt = Number(created) > 0
-        ? new Date(Number(created) * 1000).toISOString()
-        : new Date().toISOString();
+      const createdAt =
+        Number(created) > 0
+          ? new Date(Number(created) * 1000).toISOString()
+          : new Date().toISOString();
 
       return {
         id: name,
@@ -173,7 +279,33 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/sessions', (_req, res) => {
+app.get('/api/auth/status', (req, res) => {
+  res.json({ authenticated: isAuthenticatedRequest(req) });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  if (!passwordsMatch(req.body?.password)) {
+    res.status(401).json({ error: 'Invalid password' });
+    return;
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  authTokens.add(token);
+  setAuthCookie(res, token);
+  res.status(204).send();
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const token = readAuthToken(req.headers.cookie);
+  if (token) {
+    authTokens.delete(token);
+  }
+
+  clearAuthCookie(res);
+  res.status(204).send();
+});
+
+app.get('/api/sessions', requireAuth, (_req, res) => {
   try {
     const sessions = listTmuxSessions();
     res.json({ sessions });
@@ -183,7 +315,7 @@ app.get('/api/sessions', (_req, res) => {
   }
 });
 
-app.post('/api/sessions', (req, res) => {
+app.post('/api/sessions', requireAuth, (req, res) => {
   try {
     const session = createTmuxSession(req.body?.name);
     res.status(201).json({ session });
@@ -193,7 +325,7 @@ app.post('/api/sessions', (req, res) => {
   }
 });
 
-app.patch('/api/sessions/:id', (req, res) => {
+app.patch('/api/sessions/:id', requireAuth, (req, res) => {
   const sessionId = req.params.id;
 
   if (!sessionId.startsWith(SESSION_PREFIX)) {
@@ -218,7 +350,7 @@ app.patch('/api/sessions/:id', (req, res) => {
   }
 });
 
-app.delete('/api/sessions/:id', (req, res) => {
+app.delete('/api/sessions/:id', requireAuth, (req, res) => {
   const sessionId = req.params.id;
 
   if (!sessionId.startsWith(SESSION_PREFIX)) {
@@ -260,6 +392,11 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', (ws, req) => {
+  if (!isAuthenticatedCookie(req.headers.cookie)) {
+    ws.close(1008, 'unauthorized');
+    return;
+  }
+
   const url = new URL(req.url, 'http://localhost');
   const sessionId = url.searchParams.get('sessionId');
   const initialColsRaw = url.searchParams.get('cols');

@@ -49,8 +49,12 @@ function sortSessionsByOrder(sessions: Session[], order: string[]) {
   const indexMap = new Map(order.map((id, idx) => [id, idx]));
 
   return [...sessions].sort((a, b) => {
-    const ai = indexMap.has(a.id) ? (indexMap.get(a.id) as number) : Number.MAX_SAFE_INTEGER;
-    const bi = indexMap.has(b.id) ? (indexMap.get(b.id) as number) : Number.MAX_SAFE_INTEGER;
+    const ai = indexMap.has(a.id)
+      ? (indexMap.get(a.id) as number)
+      : Number.MAX_SAFE_INTEGER;
+    const bi = indexMap.has(b.id)
+      ? (indexMap.get(b.id) as number)
+      : Number.MAX_SAFE_INTEGER;
 
     if (ai !== bi) {
       return ai - bi;
@@ -84,11 +88,68 @@ export function App() {
   const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null);
   const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [touchMode, setTouchMode] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [password, setPassword] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState('');
+
   const orderRef = useRef<string[]>([]);
 
   useEffect(() => {
     orderRef.current = readSessionOrder();
   }, []);
+
+  useEffect(() => {
+    const updateTouchMode = () => {
+      const next =
+        window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900;
+      setTouchMode(next);
+    };
+
+    updateTouchMode();
+    window.addEventListener('resize', updateTouchMode);
+    return () => window.removeEventListener('resize', updateTouchMode);
+  }, []);
+
+  const clearSessionUi = useCallback(() => {
+    setSessions([]);
+    setActiveSessionId(null);
+    setBusy(false);
+    setEditingSessionId(null);
+    setEditingName('');
+    setRenamingSessionId(null);
+    setDraggingSessionId(null);
+    setDropTargetSessionId(null);
+  }, []);
+
+  const handleUnauthorized = useCallback(() => {
+    clearSessionUi();
+    setAuthenticated(false);
+    setAuthChecked(true);
+  }, [clearSessionUi]);
+
+  const checkAuth = useCallback(async () => {
+    try {
+      const response = await fetch('/api/auth/status');
+      if (!response.ok) {
+        setAuthenticated(false);
+        return;
+      }
+
+      const data = await response.json();
+      setAuthenticated(Boolean(data.authenticated));
+    } catch {
+      setAuthenticated(false);
+    } finally {
+      setAuthChecked(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkAuth().catch(console.error);
+  }, [checkAuth]);
 
   const applySessions = useCallback((nextSessions: Session[]) => {
     const nextOrder = syncSessionOrder(
@@ -102,7 +163,20 @@ export function App() {
   }, []);
 
   const fetchSessions = useCallback(async () => {
+    if (!authenticated) {
+      return;
+    }
+
     const response = await fetch('/api/sessions');
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error('Failed to load sessions');
+    }
+
     const data = await response.json();
     const nextSessions = (data.sessions as Session[]) ?? [];
     applySessions(nextSessions);
@@ -116,16 +190,65 @@ export function App() {
       const sorted = sortSessionsByOrder(nextSessions, orderRef.current);
       setActiveSessionId(sorted[0]?.id ?? null);
     }
-  }, [activeSessionId, applySessions]);
+  }, [activeSessionId, applySessions, authenticated, handleUnauthorized]);
 
   useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
     fetchSessions().catch(console.error);
     const timer = setInterval(() => {
       fetchSessions().catch(console.error);
     }, 5000);
 
     return () => clearInterval(timer);
-  }, [fetchSessions]);
+  }, [authenticated, fetchSessions]);
+
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!password) {
+      setLoginError('Password is required.');
+      return;
+    }
+
+    setLoginBusy(true);
+    setLoginError('');
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password })
+      });
+
+      if (!response.ok) {
+        setLoginError('Invalid password.');
+        return;
+      }
+
+      setPassword('');
+      setAuthenticated(true);
+      setAuthChecked(true);
+    } catch {
+      setLoginError('Failed to login.');
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors and clear local auth state anyway.
+    }
+
+    handleUnauthorized();
+  };
 
   const handleCreate = async () => {
     setBusy(true);
@@ -139,6 +262,15 @@ export function App() {
         body: JSON.stringify({ name: `Session ${count}` })
       });
 
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error('Failed to create session');
+      }
+
       const data = await response.json();
       const session = data.session as Session;
       applySessions([...sessions, session]);
@@ -149,7 +281,16 @@ export function App() {
   };
 
   const handleDelete = async (id: string) => {
-    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    const response = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error('Failed to delete session');
+    }
+
     setSessions((prev) => {
       const remaining = prev.filter((session) => session.id !== id);
       const nextOrder = syncSessionOrder(
@@ -205,6 +346,11 @@ export function App() {
         body: JSON.stringify({ name: trimmed })
       });
 
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+
       if (!response.ok) {
         console.error(await response.text());
         return;
@@ -215,8 +361,7 @@ export function App() {
 
       setSessions((prev) => {
         const next = prev.map((item) => (item.id === session.id ? updated : item));
-        const reordered = sortSessionsByOrder(next, orderRef.current);
-        return reordered;
+        return sortSessionsByOrder(next, orderRef.current);
       });
 
       if (updated.id !== session.id) {
@@ -237,6 +382,28 @@ export function App() {
     setSessions((prev) => {
       const ids = prev.map((session) => session.id);
       const nextIds = moveId(ids, sourceId, targetId);
+      const byId = new Map(prev.map((session) => [session.id, session]));
+      const reordered = nextIds
+        .map((id) => byId.get(id))
+        .filter((session): session is Session => Boolean(session));
+
+      orderRef.current = nextIds;
+      persistSessionOrder(nextIds);
+      return reordered;
+    });
+  };
+
+  const moveSessionByOffset = (sessionId: string, offset: number) => {
+    setSessions((prev) => {
+      const from = prev.findIndex((session) => session.id === sessionId);
+      const to = from + offset;
+      if (from < 0 || to < 0 || to >= prev.length) {
+        return prev;
+      }
+
+      const targetId = prev[to].id;
+      const ids = prev.map((session) => session.id);
+      const nextIds = moveId(ids, sessionId, targetId);
       const byId = new Map(prev.map((session) => [session.id, session]));
       const reordered = nextIds
         .map((id) => byId.get(id))
@@ -286,36 +453,72 @@ export function App() {
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const shellStyle = { '--sidebar-width': `${sidebarWidth}px` } as CSSProperties;
 
+  if (!authChecked) {
+    return <div className="auth-shell">Checking authentication...</div>;
+  }
+
+  if (!authenticated) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleLogin}>
+          <h1>webtmux</h1>
+          <p>Enter the single-user password to access your local terminal sessions.</p>
+          <label htmlFor="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="current-password"
+            required
+          />
+          {loginError ? <div className="auth-error">{loginError}</div> : null}
+          <button type="submit" disabled={loginBusy}>
+            {loginBusy ? 'Signing in...' : 'Sign in'}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell" style={shellStyle}>
       <aside className="session-sidebar">
         <div className="sidebar-header">
           <h1>webtmux</h1>
-          <button onClick={handleCreate} disabled={busy}>
-            New
-          </button>
+          <div className="sidebar-header-actions">
+            <button onClick={handleCreate} disabled={busy}>
+              New
+            </button>
+            <button className="logout-btn" onClick={handleLogout}>
+              Logout
+            </button>
+          </div>
         </div>
 
         <div className="session-list">
-          {sessions.map((session) => {
+          {sessions.map((session, index) => {
             const isActive = session.id === activeSessionId;
             const isEditing = session.id === editingSessionId;
             const isRenaming = session.id === renamingSessionId;
             const isDragging = session.id === draggingSessionId;
             const isDropTarget = session.id === dropTargetSessionId;
+            const isFirst = index === 0;
+            const isLast = index === sessions.length - 1;
 
             return (
               <div
                 key={session.id}
                 className={`session-item ${isActive ? 'active' : ''} ${
                   isDragging ? 'dragging' : ''
-                } ${
-                  isDropTarget ? 'drop-target' : ''
-                }`}
+                } ${isDropTarget ? 'drop-target' : ''}`}
                 onClick={() => setActiveSessionId(session.id)}
                 role="button"
                 tabIndex={0}
                 onDragOver={(event) => {
+                  if (touchMode) {
+                    return;
+                  }
                   if (!draggingSessionId) {
                     return;
                   }
@@ -323,6 +526,9 @@ export function App() {
                   event.dataTransfer.dropEffect = 'move';
                 }}
                 onDragEnter={() => {
+                  if (touchMode) {
+                    return;
+                  }
                   if (draggingSessionId && draggingSessionId !== session.id) {
                     setDropTargetSessionId(session.id);
                   }
@@ -333,6 +539,9 @@ export function App() {
                   }
                 }}
                 onDrop={(event) => {
+                  if (touchMode) {
+                    return;
+                  }
                   event.preventDefault();
                   const sourceId = event.dataTransfer.getData('text/plain');
                   if (!sourceId || sourceId === session.id) {
@@ -377,17 +586,47 @@ export function App() {
                   )}
                 </div>
                 <div className="session-actions">
-                  <button
-                    className="icon-btn drag-handle"
-                    onClick={(event) => event.stopPropagation()}
-                    title="Drag to reorder"
-                    aria-label="Drag to reorder"
-                    draggable={!isEditing}
-                    onDragStart={(event) => startTabDrag(event, session.id)}
-                    onDragEnd={clearTabDragState}
-                  >
-                    ⋮⋮
-                  </button>
+                  {touchMode ? (
+                    <>
+                      <button
+                        className="icon-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          moveSessionByOffset(session.id, -1);
+                        }}
+                        title="Move up"
+                        aria-label="Move up"
+                        disabled={isFirst}
+                      >
+                        ▲
+                      </button>
+                      <button
+                        className="icon-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          moveSessionByOffset(session.id, 1);
+                        }}
+                        title="Move down"
+                        aria-label="Move down"
+                        disabled={isLast}
+                      >
+                        ▼
+                      </button>
+                    </>
+                  ) : null}
+                  {!touchMode ? (
+                    <button
+                      className="icon-btn drag-handle"
+                      onClick={(event) => event.stopPropagation()}
+                      title="Drag to reorder"
+                      aria-label="Drag to reorder"
+                      draggable={!isEditing}
+                      onDragStart={(event) => startTabDrag(event, session.id)}
+                      onDragEnd={clearTabDragState}
+                    >
+                      ⋮⋮
+                    </button>
+                  ) : null}
                   <button
                     className="icon-btn"
                     onClick={(event) => {

@@ -19,6 +19,8 @@
     "node-pty": "^1.1.0-beta34",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-simple-keyboard": "^3.8.183",
+    "simple-keyboard": "^3.8.125",
     "ws": "^8.18.0"
   },
   "devDependencies": {
