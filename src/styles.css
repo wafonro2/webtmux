@@ -678,14 +678,35 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone {
-  --vk-key-width: clamp(30px, 8.4vw, 42px);
-  --vk-key-height: 46px;
-  --vk-font-size: 14px;
+  --vk-key-width: clamp(24px, 6.8vw, 30px);
+  --vk-key-height: 40px;
+  --vk-font-size: 12px;
+  width: 100%;
+  max-width: 100%;
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-row {
-  gap: 3px;
-  margin-bottom: 3px;
+  gap: 2px;
+  margin-bottom: 2px;
+}
+
+.terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-space {
+  flex-basis: calc(var(--vk-key-width, 24px) * 3.4);
+  width: calc(var(--vk-key-width, 24px) * 3.4);
+  min-width: calc(var(--vk-key-width, 24px) * 3.4);
+}
+
+.terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-enter,
+.terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-backspace {
+  flex-basis: calc(var(--vk-key-width, 24px) * 1.6);
+  width: calc(var(--vk-key-width, 24px) * 1.6);
+  min-width: calc(var(--vk-key-width, 24px) * 1.6);
+}
+
+.terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-mod {
+  flex-basis: calc(var(--vk-key-width, 24px) * 1.2);
+  width: calc(var(--vk-key-width, 24px) * 1.2);
+  min-width: calc(var(--vk-key-width, 24px) * 1.2);
 }
 
 .empty-state {
@@ -723,6 +744,7 @@ body {
   .terminal-area {
     grid-column: 1;
     grid-row: 2;
+    padding: 0;
   }
 
   .app-shell.sidebar-hidden .terminal-area {

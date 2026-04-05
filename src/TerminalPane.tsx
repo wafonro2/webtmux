@@ -113,10 +113,7 @@ const NAV_ROWS_TABLET = [
 ];
 
 const NAV_ROWS_PHONE = [
-  '{esc} {tab} {home} {end} {pgup} {pgdn}',
-  '{ins} {del} {left} {up} {down} {right}',
-  '{f1} {f2} {f3} {f4} {f5} {f6}',
-  '{f7} {f8} {f9} {f10} {f11} {f12}'
+  '{esc} {tab} {home} {end} {left} {up} {down} {right}'
 ];
 
 const KEYBOARD_DISPLAY: Record<string, string> = {
@@ -1669,14 +1666,18 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     themes.push({ class: 'vk-space', buttons: '{space}' });
     themes.push({ class: 'vk-enter', buttons: '{enter}' });
     themes.push({ class: 'vk-backspace', buttons: '{bksp}' });
+    const navButtons =
+      keyboardViewport === 'phone'
+        ? '{esc} {tab} {home} {end} {left} {up} {down} {right} {fit} {mic} {hide}'
+        : '{esc} {tab} {home} {end} {pgup} {pgdn} {ins} {del} {left} {up} {down} {right} {f1} {f2} {f3} {f4} {f5} {f6} {f7} {f8} {f9} {f10} {f11} {f12} {fit} {mic} {hide}';
     themes.push({
       class: 'vk-mod',
       buttons: '{shift} {ctrl} {alt} {abc} {sym} {fit} {mic} {hide}'
     });
-    themes.push({ class: 'vk-nav', buttons: '{esc} {tab} {home} {end} {pgup} {pgdn} {ins} {del} {left} {up} {down} {right} {f1} {f2} {f3} {f4} {f5} {f6} {f7} {f8} {f9} {f10} {f11} {f12} {fit} {mic} {hide}' });
+    themes.push({ class: 'vk-nav', buttons: navButtons });
 
     return themes;
-  }, [modifiers, speechListening]);
+  }, [keyboardViewport, modifiers, speechListening]);
 
   return (
     <div className="terminal-frame">
