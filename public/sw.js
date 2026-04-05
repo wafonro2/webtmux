@@ -1,4 +1,4 @@
-const CACHE_NAME = 'webtmux-cache-v1';
+const CACHE_NAME = 'webtmux-cache-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -31,6 +31,12 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') {
     return;
@@ -45,33 +51,27 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', clone));
-          return response;
-        })
-        .catch(async () => {
-          const cache = await caches.open(CACHE_NAME);
-          return cache.match('/index.html');
-        })
-    );
-    return;
-  }
-
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) {
-        return cached;
-      }
-
-      return fetch(event.request).then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+    fetch(event.request)
+      .then((response) => {
+        if (response && response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            if (event.request.mode === 'navigate') {
+              cache.put('/index.html', clone);
+              return;
+            }
+            cache.put(event.request, clone);
+          });
+        }
         return response;
-      });
-    })
+      })
+      .catch(async () => {
+        const cache = await caches.open(CACHE_NAME);
+        if (event.request.mode === 'navigate') {
+          return cache.match('/index.html');
+        }
+        return cache.match(event.request);
+      })
   );
 });

@@ -23,6 +23,31 @@ type Modifiers = {
 };
 
 type KeyboardViewport = 'phone' | 'tablet';
+type SpeechRecognitionLike = EventTarget & {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  onresult: ((event: Event) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  onend: ((event: Event) => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionEventLike = Event & {
+  resultIndex?: number;
+  results?: ArrayLike<{
+    isFinal?: boolean;
+    [index: number]: { transcript?: string } | undefined;
+  }>;
+};
+type SpeechRecognitionErrorEventLike = Event & { error?: string };
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+type WindowWithSpeechRecognition = Window & {
+  SpeechRecognition?: SpeechRecognitionCtor;
+  webkitSpeechRecognition?: SpeechRecognitionCtor;
+};
 
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
@@ -95,6 +120,7 @@ const KEYBOARD_DISPLAY: Record<string, string> = {
   '{alt}': 'Alt',
   '{abc}': 'ABC',
   '{sym}': '123',
+  '{mic}': 'Mic',
   '{fit}': 'Fit',
   '{hide}': 'Hide',
   '{f1}': 'F1',
@@ -117,6 +143,15 @@ function isTouchLike() {
   }
 
   return window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900;
+}
+
+function getSpeechRecognitionCtor() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const speechWindow = window as WindowWithSpeechRecognition;
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
 }
 
 function readStoredSize(sessionId: string): GridSize | null {
@@ -245,6 +280,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const manualSizeRef = useRef<GridSize | null>(null);
   const adjustManualSizeRef = useRef<(deltaCols: number, deltaRows: number) => void>(() => {});
   const resetManualSizeRef = useRef<() => void>(() => {});
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const speechFinalByIndexRef = useRef<Map<number, string>>(new Map());
+  const speechCommittedSegmentsRef = useRef<string[]>([]);
+  const speechKeepAliveRef = useRef(false);
 
   const [touchMode, setTouchMode] = useState(() => isTouchLike());
   const [keyboardVisible, setKeyboardVisible] = useState(() => isTouchLike());
@@ -257,6 +296,11 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     alt: false,
     shift: false
   });
+  const [speechListening, setSpeechListening] = useState(false);
+  const [speechError, setSpeechError] = useState('');
+  const [speechFinalText, setSpeechFinalText] = useState('');
+  const [speechPreviewText, setSpeechPreviewText] = useState('');
+  const [speechSupported] = useState(() => Boolean(getSpeechRecognitionCtor()));
 
   useEffect(() => {
     const updateTouchMode = () => {
@@ -499,6 +543,276 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
   };
 
+  const stopSpeechInput = () => {
+    speechKeepAliveRef.current = false;
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) {
+      setSpeechListening(false);
+      setKeyboardVisible(true);
+      return;
+    }
+
+    try {
+      recognition.stop();
+    } catch {
+      // Ignore invalid state if recognition has already stopped.
+    }
+
+    setSpeechListening(false);
+    setKeyboardVisible(true);
+  };
+
+  const buildSpeechRunText = () => {
+    return Array.from(speechFinalByIndexRef.current.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map((entry) => entry[1])
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  };
+
+  const formatSpeechSegment = (segment: string) => {
+    const trimmed = segment.trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  };
+
+  const buildSpeechPreviewText = (runText: string) => {
+    const committed = speechCommittedSegmentsRef.current
+      .map((segment) => formatSpeechSegment(segment))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    const currentRun = runText ? formatSpeechSegment(runText) : '';
+    return [committed, currentRun].filter(Boolean).join(' ').trim();
+  };
+
+  const updateSpeechPreviewText = () => {
+    const runText = buildSpeechRunText();
+    const committed = speechCommittedSegmentsRef.current.join(' ').trim();
+    const combined = [committed, runText].filter(Boolean).join(' ').trim();
+    setSpeechFinalText(combined);
+    setSpeechPreviewText(buildSpeechPreviewText(runText));
+  };
+
+  const commitSpeechRun = () => {
+    const runText = buildSpeechRunText();
+    if (runText) {
+      speechCommittedSegmentsRef.current.push(runText);
+    }
+    speechFinalByIndexRef.current = new Map();
+    setSpeechFinalText(speechCommittedSegmentsRef.current.join(' ').trim());
+    setSpeechPreviewText(buildSpeechPreviewText(''));
+  };
+
+  const startSpeechInput = () => {
+    const SpeechRecognition = getSpeechRecognitionCtor();
+    if (!SpeechRecognition) {
+      speechKeepAliveRef.current = false;
+      setSpeechError('Voice input is not supported in this browser.');
+      setSpeechListening(false);
+      return;
+    }
+
+    speechKeepAliveRef.current = true;
+    setSpeechError('');
+    setSpeechFinalText('');
+    setSpeechPreviewText('');
+    speechCommittedSegmentsRef.current = [];
+    speechFinalByIndexRef.current = new Map();
+    setKeyboardVisible(false);
+
+    if (!speechRecognitionRef.current) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      recognition.lang = navigator.language || 'en-US';
+
+      recognition.onresult = (event) => {
+        const speechEvent = event as SpeechRecognitionEventLike;
+
+        if (!speechEvent.results) {
+          return;
+        }
+
+        for (let index = 0; index < speechEvent.results.length; index += 1) {
+          const result = speechEvent.results[index];
+          const transcript = result?.[0]?.transcript ?? '';
+          if (!transcript) {
+            continue;
+          }
+
+          if (result?.isFinal) {
+            speechFinalByIndexRef.current.set(index, transcript.trim());
+          }
+        }
+
+        updateSpeechPreviewText();
+      };
+
+      recognition.onerror = (event) => {
+        const speechErrorEvent = event as SpeechRecognitionErrorEventLike;
+        const reason = speechErrorEvent.error ?? 'unknown';
+        const recoverable = reason === 'no-speech' || reason === 'aborted';
+        if (!recoverable) {
+          speechKeepAliveRef.current = false;
+          setSpeechError(`Voice input error: ${reason}.`);
+        }
+        if (!speechKeepAliveRef.current) {
+          setSpeechListening(false);
+        }
+      };
+
+      recognition.onend = () => {
+        commitSpeechRun();
+        if (speechKeepAliveRef.current) {
+          try {
+            recognition.start();
+            setSpeechListening(true);
+            return;
+          } catch {
+            window.setTimeout(() => {
+              if (!speechKeepAliveRef.current) {
+                return;
+              }
+              try {
+                recognition.start();
+                setSpeechListening(true);
+              } catch {
+                setSpeechListening(false);
+              }
+            }, 120);
+            return;
+          }
+        }
+        setSpeechListening(false);
+        setKeyboardVisible(true);
+      };
+
+      speechRecognitionRef.current = recognition;
+    }
+
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) {
+      return;
+    }
+
+    recognition.lang = navigator.language || recognition.lang;
+
+    try {
+      recognition.start();
+      setSpeechListening(true);
+    } catch {
+      speechKeepAliveRef.current = false;
+      setSpeechError('Could not start voice input. Check mic permission and retry.');
+      setSpeechListening(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      const recognition = speechRecognitionRef.current;
+      if (!recognition) {
+        return;
+      }
+
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      speechKeepAliveRef.current = false;
+
+      try {
+        recognition.abort();
+      } catch {
+        // Ignore abort errors during teardown.
+      }
+
+      speechRecognitionRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    speechKeepAliveRef.current = false;
+    setSpeechError('');
+    setSpeechListening(false);
+    setSpeechFinalText('');
+    setSpeechPreviewText('');
+    speechCommittedSegmentsRef.current = [];
+    speechFinalByIndexRef.current = new Map();
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) {
+      return;
+    }
+
+    try {
+      recognition.stop();
+    } catch {
+      // Ignore invalid state when switching sessions.
+    }
+  }, [sessionId]);
+
+  const clearSpeechBuffer = () => {
+    setSpeechFinalText('');
+    setSpeechPreviewText('');
+    speechCommittedSegmentsRef.current = [];
+    speechFinalByIndexRef.current = new Map();
+  };
+
+  const clearLastSpeechSegment = () => {
+    const runText = buildSpeechRunText();
+    if (runText) {
+      speechFinalByIndexRef.current = new Map();
+      updateSpeechPreviewText();
+      return;
+    }
+
+    if (!speechCommittedSegmentsRef.current.length) {
+      return;
+    }
+
+    speechCommittedSegmentsRef.current.pop();
+    updateSpeechPreviewText();
+  };
+
+  const sendSpeechBuffer = (withEnter: boolean) => {
+    const buffered = speechFinalText.trim();
+    if (!buffered && !withEnter) {
+      return;
+    }
+
+    if (buffered) {
+      sendInput(buffered);
+    }
+    if (withEnter) {
+      // Send Enter as a dedicated key event payload after text.
+      sendInput('\r');
+    }
+    clearSpeechBuffer();
+  };
+
+  const handleKeyboardToggle = () => {
+    if (speechListening) {
+      stopSpeechInput();
+      setKeyboardVisible(true);
+      return;
+    }
+
+    setKeyboardVisible((prev) => !prev);
+  };
+
+  const handleVoiceToggle = () => {
+    if (speechListening) {
+      stopSpeechInput();
+      return;
+    }
+
+    startSpeechInput();
+  };
+
   const clearOneShotModifiers = () => {
     setModifiers({ ctrl: false, alt: false, shift: false });
   };
@@ -571,6 +885,11 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       return;
     }
 
+    if (token === 'mic') {
+      handleVoiceToggle();
+      return;
+    }
+
     if (token && (ACTION_SEQUENCES[token] || FUNCTION_KEYS[token])) {
       sendAction(token);
       return;
@@ -587,14 +906,16 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       keyboardMode === 'abc'
         ? buildAlphaRows(modifiers.shift, keyboardViewport)
         : buildSymbolRows(keyboardViewport);
-    return [...navRows, ...contentRows, '{fit} {hide}'];
-  }, [keyboardMode, keyboardViewport, modifiers.shift]);
+    const utilityRow = speechSupported ? '{fit} {mic} {hide}' : '{fit} {hide}';
+    return [...navRows, ...contentRows, utilityRow];
+  }, [keyboardMode, keyboardViewport, modifiers.shift, speechSupported]);
 
   const buttonTheme = useMemo(() => {
     const activeButtons = [
       modifiers.ctrl ? '{ctrl}' : '',
       modifiers.alt ? '{alt}' : '',
-      modifiers.shift ? '{shift}' : ''
+      modifiers.shift ? '{shift}' : '',
+      speechListening ? '{mic}' : ''
     ]
       .filter(Boolean)
       .join(' ');
@@ -610,12 +931,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     themes.push({ class: 'vk-backspace', buttons: '{bksp}' });
     themes.push({
       class: 'vk-mod',
-      buttons: '{shift} {ctrl} {alt} {abc} {sym} {fit} {hide}'
+      buttons: '{shift} {ctrl} {alt} {abc} {sym} {fit} {mic} {hide}'
     });
-    themes.push({ class: 'vk-nav', buttons: '{esc} {tab} {home} {end} {pgup} {pgdn} {ins} {del} {left} {up} {down} {right} {f1} {f2} {f3} {f4} {f5} {f6} {f7} {f8} {f9} {f10} {f11} {f12} {fit} {hide}' });
+    themes.push({ class: 'vk-nav', buttons: '{esc} {tab} {home} {end} {pgup} {pgdn} {ins} {del} {left} {up} {down} {right} {f1} {f2} {f3} {f4} {f5} {f6} {f7} {f8} {f9} {f10} {f11} {f12} {fit} {mic} {hide}' });
 
     return themes;
-  }, [modifiers]);
+  }, [modifiers, speechListening]);
 
   return (
     <div className="terminal-frame">
@@ -627,7 +948,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setKeyboardVisible((prev) => !prev)}
+            onClick={handleKeyboardToggle}
           >
             {keyboardVisible ? 'Hide Keyboard' : 'Show Keyboard'}
           </button>
@@ -639,10 +960,76 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
           >
             Fit Terminal
           </button>
+          {speechSupported ? (
+            <button
+              type="button"
+              className={`terminal-toolbar-btn ${speechListening ? 'listening' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={handleVoiceToggle}
+            >
+              {speechListening ? 'Stop Voice' : 'Voice Input'}
+            </button>
+          ) : null}
         </div>
       ) : null}
 
-      {touchMode && keyboardVisible ? (
+      {touchMode && speechError ? (
+        <div className="terminal-speech-error">{speechError}</div>
+      ) : null}
+      {touchMode && speechListening ? (
+        <div className="terminal-voice-panel">
+          <div className="terminal-voice-preview">
+            {speechPreviewText.trim() || 'Listening...'}
+          </div>
+          <div className="terminal-voice-actions">
+            <button
+              type="button"
+              className="terminal-toolbar-btn send-left"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => sendSpeechBuffer(false)}
+              disabled={!speechFinalText.trim()}
+            >
+              Send
+            </button>
+            <button
+              type="button"
+              className="terminal-toolbar-btn"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={clearLastSpeechSegment}
+              disabled={!speechFinalText.trim()}
+            >
+              Clear Last
+            </button>
+            <button
+              type="button"
+              className="terminal-toolbar-btn"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={clearSpeechBuffer}
+              disabled={!speechFinalText.trim()}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="terminal-toolbar-btn listening"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={stopSpeechInput}
+            >
+              Stop Voice
+            </button>
+            <button
+              type="button"
+              className="terminal-toolbar-btn success"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => sendSpeechBuffer(true)}
+            >
+              Send + Enter
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {touchMode && keyboardVisible && !speechListening ? (
         <div className="terminal-keyboard">
           <Suspense fallback={<div className="keyboard-loading">Loading keyboard...</div>}>
             <VirtualKeyboard
