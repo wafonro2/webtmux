@@ -267,9 +267,16 @@ function sessionDisplayName(sessionName) {
 }
 
 function listTmuxSessions() {
-  const output = runTmux(['list-sessions', '-F', '#{session_name}|#{session_created}'], {
-    allowNoServer: true
-  });
+  const output = runTmux(
+    [
+      'list-sessions',
+      '-F',
+      '#{session_name}|#{session_created}|#{session_alerts}|#{session_activity}'
+    ],
+    {
+      allowNoServer: true
+    }
+  );
 
   if (!output) {
     return [];
@@ -280,17 +287,24 @@ function listTmuxSessions() {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [name, created] = line.split('|');
+      const [name, created, alertsRaw, activityRaw] = line.split('|');
       const createdAt =
         Number(created) > 0
           ? new Date(Number(created) * 1000).toISOString()
           : new Date().toISOString();
+      const lastActivityAt =
+        Number(activityRaw) > 0
+          ? new Date(Number(activityRaw) * 1000).toISOString()
+          : createdAt;
+      const alerts = typeof alertsRaw === 'string' ? alertsRaw.trim() : '';
 
       return {
         id: name,
         name: sessionDisplayName(name),
         createdAt,
-        status: 'running'
+        lastActivityAt,
+        status: 'running',
+        alerts
       };
     })
     .filter((session) => session.id.startsWith(SESSION_PREFIX));
@@ -334,6 +348,7 @@ function createTmuxSession(displayNameInput) {
   const candidate = buildUniqueSessionId(baseName);
 
   runTmux(['new-session', '-d', '-s', candidate]);
+  configureTmuxSessionAlerts(candidate);
 
   const created = listTmuxSessions().find((session) => session.id === candidate);
   if (!created) {
@@ -365,6 +380,40 @@ function renameTmuxSession(sessionId, nextDisplayNameInput) {
   }
 
   return renamed;
+}
+
+function configureTmuxSessionAlerts(sessionId) {
+  // Ensure tmux emits activity and bell alerts for managed sessions.
+  try {
+    runTmux(['set-window-option', '-t', `${sessionId}:*`, 'monitor-activity', 'on']);
+  } catch {
+    // Ignore option failures and keep service running.
+  }
+
+  try {
+    runTmux(['set-window-option', '-t', `${sessionId}:*`, 'monitor-bell', 'on']);
+  } catch {
+    // Ignore option failures and keep service running.
+  }
+}
+
+function configureManagedSessionAlerts() {
+  try {
+    runTmux(['set-option', '-gw', 'monitor-activity', 'on']);
+  } catch {
+    // Ignore global option failures.
+  }
+
+  try {
+    runTmux(['set-option', '-gw', 'monitor-bell', 'on']);
+  } catch {
+    // Ignore global option failures.
+  }
+
+  const sessions = listTmuxSessions();
+  for (const session of sessions) {
+    configureTmuxSessionAlerts(session.id);
+  }
 }
 
 function ensureAtLeastOneSession() {
@@ -651,6 +700,7 @@ wss.on('connection', (ws, req) => {
 
 try {
   ensureAtLeastOneSession();
+  configureManagedSessionAlerts();
 } catch (err) {
   const message = err instanceof Error ? err.message : 'tmux init failed';
   console.error(message);

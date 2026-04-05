@@ -1,14 +1,31 @@
-import { CSSProperties, useCallback, useEffect, useRef, useState } from 'react';
+import { CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TerminalPane } from './TerminalPane';
 
 type Session = {
   id: string;
   name: string;
   createdAt: string;
+  lastActivityAt?: string;
   status: 'running' | 'exited';
+  alerts?: string;
+};
+
+type StoppedSessionAlert = {
+  id: string;
+  name: string;
+  stoppedAt: string;
+  seen: boolean;
+  reason: 'missing' | 'exited';
+};
+
+type LiveSessionAlert = {
+  token: string;
 };
 
 const SESSION_ORDER_KEY = 'webtmux-session-order';
+const SESSION_ACTIVITY_SEEN_KEY = 'webtmux-session-activity-seen';
+const SESSION_SNAPSHOT_KEY = 'webtmux-session-snapshot';
+const SESSION_ALERT_SEEN_KEY = 'webtmux-session-alert-seen';
 
 function readSessionOrder(): string[] {
   try {
@@ -30,6 +47,90 @@ function readSessionOrder(): string[] {
 
 function persistSessionOrder(order: string[]) {
   localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(order));
+}
+
+function readSeenActivityMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(SESSION_ACTIVITY_SEEN_KEY);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+
+    const cleaned: Record<string, string> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof id === 'string' && typeof value === 'string' && value) {
+        cleaned[id] = value;
+      }
+    }
+
+    return cleaned;
+  } catch {
+    return {};
+  }
+}
+
+function persistSeenActivityMap(map: Record<string, string>) {
+  localStorage.setItem(SESSION_ACTIVITY_SEEN_KEY, JSON.stringify(map));
+}
+
+function readSessionSnapshot(): Map<string, Session> {
+  try {
+    const raw = localStorage.getItem(SESSION_SNAPSHOT_KEY);
+    if (!raw) {
+      return new Map();
+    }
+
+    const parsed = JSON.parse(raw) as Session[];
+    if (!Array.isArray(parsed)) {
+      return new Map();
+    }
+
+    return new Map(
+      parsed
+        .filter((item) => item && typeof item.id === 'string')
+        .map((item) => [item.id, item])
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function persistSessionSnapshot(sessions: Session[]) {
+  localStorage.setItem(SESSION_SNAPSHOT_KEY, JSON.stringify(sessions));
+}
+
+function readSeenAlertTokenMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(SESSION_ALERT_SEEN_KEY);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+
+    const cleaned: Record<string, string> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof id === 'string' && typeof value === 'string' && value) {
+        cleaned[id] = value;
+      }
+    }
+
+    return cleaned;
+  } catch {
+    return {};
+  }
+}
+
+function persistSeenAlertTokenMap(map: Record<string, string>) {
+  localStorage.setItem(SESSION_ALERT_SEEN_KEY, JSON.stringify(map));
 }
 
 function syncSessionOrder(sessionIds: string[], existingOrder: string[]) {
@@ -94,11 +195,33 @@ export function App() {
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [stoppedAlerts, setStoppedAlerts] = useState<StoppedSessionAlert[]>([]);
+  const [liveAlerts, setLiveAlerts] = useState<Record<string, LiveSessionAlert>>({});
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return 'unsupported';
+    }
+
+    return Notification.permission;
+  });
 
   const orderRef = useRef<string[]>([]);
+  const knownSessionsRef = useRef<Map<string, Session>>(new Map());
+  const snapshotSessionsRef = useRef<Map<string, Session>>(new Map());
+  const seenActivityRef = useRef<Record<string, string>>({});
+  const seenAlertTokenRef = useRef<Record<string, string>>({});
+  const activityCatchupPendingRef = useRef(true);
+  const appWasHiddenRef = useRef(false);
+  const expectedClosedSessionsRef = useRef<Set<string>>(new Set());
+  const notificationKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     orderRef.current = readSessionOrder();
+    seenActivityRef.current = readSeenActivityMap();
+    seenAlertTokenRef.current = readSeenAlertTokenMap();
+    snapshotSessionsRef.current = readSessionSnapshot();
   }, []);
 
   useEffect(() => {
@@ -122,6 +245,14 @@ export function App() {
     setRenamingSessionId(null);
     setDraggingSessionId(null);
     setDropTargetSessionId(null);
+    setStoppedAlerts([]);
+    setLiveAlerts({});
+    knownSessionsRef.current = new Map();
+    expectedClosedSessionsRef.current = new Set();
+    notificationKeysRef.current = new Set();
+    activityCatchupPendingRef.current = true;
+    appWasHiddenRef.current = false;
+    seenAlertTokenRef.current = readSeenAlertTokenMap();
   }, []);
 
   const handleUnauthorized = useCallback(() => {
@@ -151,16 +282,257 @@ export function App() {
     checkAuth().catch(console.error);
   }, [checkAuth]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return;
+    }
+
+    setNotificationPermission(Notification.permission);
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (authenticated) {
+      activityCatchupPendingRef.current = true;
+    }
+  }, [authenticated]);
+
+  const maybeNotify = useCallback((key: string, title: string, body: string) => {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return;
+    }
+
+    if (Notification.permission !== 'granted') {
+      return;
+    }
+
+    if (document.visibilityState === 'visible') {
+      return;
+    }
+
+    if (notificationKeysRef.current.has(key)) {
+      return;
+    }
+
+    notificationKeysRef.current.add(key);
+    try {
+      new Notification(title, { body, tag: key });
+    } catch {
+      // Ignore browser notification errors.
+    }
+  }, []);
+
+  const enableNotifications = useCallback(async () => {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      setNotificationPermission('unsupported');
+      return;
+    }
+
+    try {
+      const result = await Notification.requestPermission();
+      setNotificationPermission(result);
+    } catch {
+      setNotificationPermission(Notification.permission);
+    }
+  }, []);
+
   const applySessions = useCallback((nextSessions: Session[]) => {
     const nextOrder = syncSessionOrder(
       nextSessions.map((session) => session.id),
       orderRef.current
     );
 
+    const previousById = knownSessionsRef.current;
+    const baselinePrevious =
+      previousById.size > 0 ? previousById : snapshotSessionsRef.current;
+    const nextById = new Map(nextSessions.map((session) => [session.id, session]));
+    const nowIso = new Date().toISOString();
+
+    setStoppedAlerts((prev) => {
+      const byId = new Map(prev.map((alert) => [alert.id, alert]));
+
+      for (const [previousId, previousSession] of baselinePrevious.entries()) {
+        if (nextById.has(previousId)) {
+          continue;
+        }
+
+        if (expectedClosedSessionsRef.current.has(previousId)) {
+          expectedClosedSessionsRef.current.delete(previousId);
+          continue;
+        }
+
+        const existing = byId.get(previousId);
+        const alert = {
+          id: previousId,
+          name: previousSession.name,
+          stoppedAt: nowIso,
+          seen: existing?.seen ?? false,
+          reason: 'missing' as const
+        };
+        byId.set(previousId, {
+          ...alert
+        });
+        if (!existing) {
+          maybeNotify(
+            `stopped:${previousId}`,
+            'webtmux alert',
+            `${previousSession.name} stopped or disappeared.`
+          );
+        }
+      }
+
+      for (const session of nextSessions) {
+        if (session.status === 'exited') {
+          const existing = byId.get(session.id);
+          const seen = existing?.seen ?? session.id === activeSessionId;
+          const alert = {
+            id: session.id,
+            name: session.name,
+            stoppedAt: nowIso,
+            seen,
+            reason: 'exited' as const
+          };
+          byId.set(session.id, {
+            ...alert
+          });
+          if (!seen && !existing) {
+            maybeNotify(
+              `exited:${session.id}`,
+              'webtmux alert',
+              `${session.name} exited.`
+            );
+          }
+        } else {
+          byId.delete(session.id);
+        }
+      }
+
+      return Array.from(byId.values()).sort((a, b) =>
+        b.stoppedAt.localeCompare(a.stoppedAt)
+      );
+    });
+
+    const allowActivityCatchup = activityCatchupPendingRef.current;
+    setLiveAlerts((prev) => {
+      const next: Record<string, LiveSessionAlert> = {};
+      const nextSeenActivity = { ...seenActivityRef.current };
+      const nextSeenAlertToken = { ...seenAlertTokenRef.current };
+      let seenActivityChanged = false;
+      let seenAlertTokenChanged = false;
+
+      for (const session of nextSessions) {
+        const tmuxToken = (session.alerts || '').trim();
+        const activityIso = session.lastActivityAt || '';
+        const hasActivityTimestamp = Number.isFinite(Date.parse(activityIso));
+        const previousSeenIso = nextSeenActivity[session.id];
+        let hasUnseenActivity = false;
+
+        if (hasActivityTimestamp) {
+          if (!previousSeenIso) {
+            nextSeenActivity[session.id] = activityIso;
+            seenActivityChanged = true;
+          } else if (
+            allowActivityCatchup &&
+            Date.parse(activityIso) > Date.parse(previousSeenIso) + 500
+          ) {
+            hasUnseenActivity = true;
+          }
+        }
+
+        if (session.id === activeSessionId && hasActivityTimestamp) {
+          if (!previousSeenIso || Date.parse(activityIso) > Date.parse(previousSeenIso)) {
+            nextSeenActivity[session.id] = activityIso;
+            seenActivityChanged = true;
+          }
+          hasUnseenActivity = false;
+        }
+
+        const tokenParts: string[] = [];
+        if (tmuxToken) {
+          tokenParts.push(`tmux:${tmuxToken}`);
+        }
+        if (hasUnseenActivity && activityIso) {
+          tokenParts.push(`activity:${activityIso}`);
+        }
+        const token = tokenParts.join('|');
+        const existing = prev[session.id];
+
+        if (session.id === activeSessionId) {
+          // Opening the tab acknowledges any pending live alert.
+          if (token) {
+            if (nextSeenAlertToken[session.id] !== token) {
+              nextSeenAlertToken[session.id] = token;
+              seenAlertTokenChanged = true;
+            }
+          } else if (nextSeenAlertToken[session.id]) {
+            delete nextSeenAlertToken[session.id];
+            seenAlertTokenChanged = true;
+          }
+          continue;
+        }
+
+        if (!token) {
+          // Keep unseen catch-up activity until user opens that tab.
+          if (existing && existing.token.includes('activity:')) {
+            next[session.id] = existing;
+          }
+          if (nextSeenAlertToken[session.id]) {
+            delete nextSeenAlertToken[session.id];
+            seenAlertTokenChanged = true;
+          }
+          continue;
+        }
+
+        const seenToken = nextSeenAlertToken[session.id];
+        const tokenAlreadySeen = seenToken === token;
+        if (tokenAlreadySeen) {
+          continue;
+        }
+
+        const tokenChanged = !existing || existing.token !== token;
+        next[session.id] = tokenChanged ? { token } : existing;
+
+        if (tokenChanged) {
+          maybeNotify(
+            `live:${session.id}:${token}`,
+            'webtmux alert',
+            `${session.name} reported terminal activity/bell.`
+          );
+        }
+      }
+
+      for (const sessionId of Object.keys(nextSeenActivity)) {
+        if (!nextById.has(sessionId)) {
+          delete nextSeenActivity[sessionId];
+          seenActivityChanged = true;
+        }
+      }
+      for (const sessionId of Object.keys(nextSeenAlertToken)) {
+        if (!nextById.has(sessionId)) {
+          delete nextSeenAlertToken[sessionId];
+          seenAlertTokenChanged = true;
+        }
+      }
+
+      if (seenActivityChanged) {
+        seenActivityRef.current = nextSeenActivity;
+        persistSeenActivityMap(nextSeenActivity);
+      }
+      if (seenAlertTokenChanged) {
+        seenAlertTokenRef.current = nextSeenAlertToken;
+        persistSeenAlertTokenMap(nextSeenAlertToken);
+      }
+
+      return next;
+    });
+    activityCatchupPendingRef.current = false;
+
+    knownSessionsRef.current = nextById;
+    snapshotSessionsRef.current = nextById;
+    persistSessionSnapshot(nextSessions);
     orderRef.current = nextOrder;
     persistSessionOrder(nextOrder);
     setSessions(sortSessionsByOrder(nextSessions, nextOrder));
-  }, []);
+  }, [activeSessionId, maybeNotify]);
 
   const fetchSessions = useCallback(async () => {
     if (!authenticated) {
@@ -204,6 +576,84 @@ export function App() {
 
     return () => clearInterval(timer);
   }, [authenticated, fetchSessions]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        appWasHiddenRef.current = true;
+        return;
+      }
+
+      if (appWasHiddenRef.current) {
+        activityCatchupPendingRef.current = true;
+        appWasHiddenRef.current = false;
+      }
+
+      fetchSessions().catch(console.error);
+    };
+
+    const handleFocus = () => {
+      if (appWasHiddenRef.current) {
+        activityCatchupPendingRef.current = true;
+        appWasHiddenRef.current = false;
+      }
+      fetchSessions().catch(console.error);
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [authenticated, fetchSessions]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      return;
+    }
+
+    setLiveAlerts((prev) => {
+      const current = prev[activeSessionId];
+      if (!current) {
+        return prev;
+      }
+
+      const nextSeenAlertToken = {
+        ...seenAlertTokenRef.current,
+        [activeSessionId]: current.token
+      };
+      seenAlertTokenRef.current = nextSeenAlertToken;
+      persistSeenAlertTokenMap(nextSeenAlertToken);
+
+      const next = { ...prev };
+      delete next[activeSessionId];
+      return next;
+    });
+
+    setStoppedAlerts((prev) =>
+      prev.map((alert) => (alert.id === activeSessionId ? { ...alert, seen: true } : alert))
+    );
+
+    const activeSession = sessions.find((session) => session.id === activeSessionId);
+    const activityIso = activeSession?.lastActivityAt || '';
+    if (activityIso && Number.isFinite(Date.parse(activityIso))) {
+      const previousSeenIso = seenActivityRef.current[activeSessionId];
+      if (!previousSeenIso || Date.parse(activityIso) > Date.parse(previousSeenIso)) {
+        const nextSeenActivity = {
+          ...seenActivityRef.current,
+          [activeSessionId]: activityIso
+        };
+        seenActivityRef.current = nextSeenActivity;
+        persistSeenActivityMap(nextSeenActivity);
+      }
+    }
+  }, [activeSessionId, sessions]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -281,6 +731,7 @@ export function App() {
   };
 
   const handleDelete = async (id: string) => {
+    expectedClosedSessionsRef.current.add(id);
     const response = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     if (response.status === 401) {
       handleUnauthorized();
@@ -288,9 +739,11 @@ export function App() {
     }
 
     if (!response.ok) {
+      expectedClosedSessionsRef.current.delete(id);
       throw new Error('Failed to delete session');
     }
 
+    setStoppedAlerts((prev) => prev.filter((alert) => alert.id !== id));
     setSessions((prev) => {
       const remaining = prev.filter((session) => session.id !== id);
       const nextOrder = syncSessionOrder(
@@ -314,8 +767,39 @@ export function App() {
     }
   };
 
+  const selectSession = useCallback((id: string) => {
+    setActiveSessionId(id);
+    setLiveAlerts((prev) => {
+      const current = prev[id];
+      if (!current) {
+        return prev;
+      }
+
+      const nextSeenAlertToken = {
+        ...seenAlertTokenRef.current,
+        [id]: current.token
+      };
+      seenAlertTokenRef.current = nextSeenAlertToken;
+      persistSeenAlertTokenMap(nextSeenAlertToken);
+
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const acknowledgeStoppedAlert = useCallback((id: string) => {
+    setStoppedAlerts((prev) =>
+      prev.map((alert) => (alert.id === id ? { ...alert, seen: true } : alert))
+    );
+  }, []);
+
+  const dismissStoppedAlert = useCallback((id: string) => {
+    setStoppedAlerts((prev) => prev.filter((alert) => alert.id !== id));
+  }, []);
+
   const startRename = (session: Session) => {
-    setActiveSessionId(session.id);
+    selectSession(session.id);
     setEditingSessionId(session.id);
     setEditingName(session.name);
   };
@@ -451,6 +935,12 @@ export function App() {
   };
 
   const activeSession = sessions.find((session) => session.id === activeSessionId);
+  const unseenLiveAlertCount = useMemo(() => Object.keys(liveAlerts).length, [liveAlerts]);
+  const unseenStoppedAlertCount = useMemo(
+    () => stoppedAlerts.filter((alert) => !alert.seen).length,
+    [stoppedAlerts]
+  );
+  const totalUnseenAlerts = unseenLiveAlertCount + unseenStoppedAlertCount;
   const shellStyle = { '--sidebar-width': `${sidebarWidth}px` } as CSSProperties;
 
   if (!authChecked) {
@@ -485,8 +975,21 @@ export function App() {
     <div className="app-shell" style={shellStyle}>
       <aside className="session-sidebar">
         <div className="sidebar-header">
-          <h1>webtmux</h1>
+          <h1>
+            webtmux
+            {totalUnseenAlerts > 0 ? (
+              <span className="alert-count-badge" title="Unseen terminal alerts">
+                {totalUnseenAlerts}
+              </span>
+            ) : null}
+          </h1>
           <div className="sidebar-header-actions">
+            {notificationPermission !== 'unsupported' &&
+            notificationPermission !== 'granted' ? (
+              <button onClick={() => enableNotifications().catch(console.error)}>
+                Notify
+              </button>
+            ) : null}
             <button onClick={handleCreate} disabled={busy}>
               New
             </button>
@@ -505,6 +1008,10 @@ export function App() {
             const isDropTarget = session.id === dropTargetSessionId;
             const isFirst = index === 0;
             const isLast = index === sessions.length - 1;
+            const liveAlert = liveAlerts[session.id];
+            const dotClass = liveAlert
+              ? 'status-dot alert unseen'
+              : `status-dot ${session.status === 'running' ? 'running' : 'exited'}`;
 
             return (
               <div
@@ -512,7 +1019,7 @@ export function App() {
                 className={`session-item ${isActive ? 'active' : ''} ${
                   isDragging ? 'dragging' : ''
                 } ${isDropTarget ? 'drop-target' : ''}`}
-                onClick={() => setActiveSessionId(session.id)}
+                onClick={() => selectSession(session.id)}
                 role="button"
                 tabIndex={0}
                 onDragOver={(event) => {
@@ -553,16 +1060,12 @@ export function App() {
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
-                    setActiveSessionId(session.id);
+                    selectSession(session.id);
                   }
                 }}
               >
                 <div className="session-main">
-                  <span
-                    className={`status-dot ${
-                      session.status === 'running' ? 'running' : 'exited'
-                    }`}
-                  />
+                  <span className={dotClass} />
                   {isEditing ? (
                     <input
                       className="session-name-input"
@@ -667,6 +1170,54 @@ export function App() {
               </div>
             );
           })}
+          {stoppedAlerts.length ? (
+            <div className="stopped-alerts">
+              <div className="stopped-alerts-header">Stopped Sessions</div>
+              {stoppedAlerts.map((alert) => (
+                <div
+                  key={`stopped-${alert.id}`}
+                  className={`session-item stopped-item ${alert.seen ? 'seen' : 'unseen'}`}
+                  onClick={() => acknowledgeStoppedAlert(alert.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      acknowledgeStoppedAlert(alert.id);
+                    }
+                  }}
+                >
+                  <div className="session-main">
+                    <span className={`status-dot alert ${alert.seen ? 'seen' : 'unseen'}`} />
+                    <span className="session-name">
+                      {alert.name}
+                      <span className="stopped-reason">
+                        {alert.reason === 'exited' ? ' exited' : ' stopped'}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="session-actions">
+                    <span className="stopped-time">
+                      {new Date(alert.stoppedAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </span>
+                    <button
+                      className="icon-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        dismissStoppedAlert(alert.id);
+                      }}
+                      title="Dismiss alert"
+                      aria-label="Dismiss alert"
+                    >
+                      x
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       </aside>
 
