@@ -310,6 +310,16 @@ function isTouchLike() {
   return window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900;
 }
 
+function shouldAutoShowKeyboardAfterVoiceStop() {
+  if (typeof window === 'undefined') {
+    return true;
+  }
+
+  const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+  const phoneWidth = window.innerWidth <= 820;
+  return !(coarsePointer && phoneWidth);
+}
+
 function getSpeechRecognitionCtor() {
   if (typeof window === 'undefined') {
     return null;
@@ -982,6 +992,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   };
 
   const stopSpeechInput = () => {
+    const restoreKeyboard = () => {
+      if (shouldAutoShowKeyboardAfterVoiceStop()) {
+        setKeyboardVisible(true);
+      }
+    };
+
     if (voiceEngine === 'whisper') {
       if (whisperRecording) {
         const recorder = whisperRecorderRef.current;
@@ -1004,12 +1020,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       setWhisperRecording(false);
       if (!whisperRecorderRef.current && !whisperStreamRef.current) {
         setSpeechListening(false);
-        setKeyboardVisible(true);
+        restoreKeyboard();
       } else {
         releaseWhisperCapture();
       }
       setSpeechListening(false);
-      setKeyboardVisible(true);
+      restoreKeyboard();
       return;
     }
 
@@ -1017,7 +1033,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     releaseSpeechRecognition(true);
 
     setSpeechListening(false);
-    setKeyboardVisible(true);
+    restoreKeyboard();
   };
 
   const buildSpeechRunText = () => {
@@ -1198,7 +1214,9 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         }
       }
       setSpeechListening(false);
-      setKeyboardVisible(true);
+      if (shouldAutoShowKeyboardAfterVoiceStop()) {
+        setKeyboardVisible(true);
+      }
       releaseSpeechRecognition(false);
     };
 
@@ -1670,17 +1688,35 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={handleKeyboardToggle}
+            onClick={() => sendAction('up')}
+            aria-label="Arrow up"
           >
-            {keyboardVisible ? 'Hide Keyboard' : 'Show Keyboard'}
+            ↑
           </button>
           <button
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => resetManualSizeRef.current()}
+            onClick={() => sendAction('down')}
+            aria-label="Arrow down"
           >
-            Fit Terminal
+            ↓
+          </button>
+          <button
+            type="button"
+            className="terminal-toolbar-btn"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => sendAction('enter')}
+          >
+            Enter
+          </button>
+          <button
+            type="button"
+            className="terminal-toolbar-btn"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={handleKeyboardToggle}
+          >
+            {keyboardVisible ? 'Hide Keyboard' : 'Show Keyboard'}
           </button>
           {speechSupported ? (
             <button

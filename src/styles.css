@@ -95,6 +95,16 @@ body {
   grid-template-columns: var(--sidebar-width, 280px) 8px minmax(0, 1fr);
   width: 100%;
   height: 100%;
+  position: relative;
+}
+
+.app-shell.sidebar-hidden {
+  grid-template-columns: 0 0 minmax(0, 1fr);
+}
+
+.app-shell.sidebar-hidden .session-sidebar,
+.app-shell.sidebar-hidden .sidebar-resizer {
+  display: none;
 }
 
 .session-sidebar {
@@ -383,6 +393,26 @@ body {
   height: 42px;
   border-radius: 2px;
   background: rgba(220, 231, 255, 0.75);
+}
+
+.sidebar-reveal-btn {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 40;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 9px;
+  background: rgba(10, 16, 26, 0.9);
+  color: #dce7ff;
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-reveal-btn:hover {
+  background: rgba(20, 31, 49, 0.95);
 }
 
 .terminal-area {
@@ -674,6 +704,11 @@ body {
     grid-template-rows: 220px minmax(0, 1fr);
   }
 
+  .app-shell.sidebar-hidden {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
   .session-sidebar {
     grid-column: 1;
     grid-row: 1;
@@ -688,5 +723,14 @@ body {
   .terminal-area {
     grid-column: 1;
     grid-row: 2;
+  }
+
+  .app-shell.sidebar-hidden .terminal-area {
+    grid-row: 1;
+  }
+
+  .sidebar-reveal-btn {
+    top: 14px;
+    left: 14px;
   }
 }

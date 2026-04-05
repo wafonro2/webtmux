@@ -26,6 +26,7 @@ const SESSION_ORDER_KEY = 'webtmux-session-order';
 const SESSION_ACTIVITY_SEEN_KEY = 'webtmux-session-activity-seen';
 const SESSION_SNAPSHOT_KEY = 'webtmux-session-snapshot';
 const SESSION_ALERT_SEEN_KEY = 'webtmux-session-alert-seen';
+const SIDEBAR_HIDDEN_KEY = 'webtmux-sidebar-hidden';
 
 function readSessionOrder(): string[] {
   try {
@@ -133,6 +134,18 @@ function persistSeenAlertTokenMap(map: Record<string, string>) {
   localStorage.setItem(SESSION_ALERT_SEEN_KEY, JSON.stringify(map));
 }
 
+function readSidebarHidden() {
+  try {
+    return localStorage.getItem(SIDEBAR_HIDDEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistSidebarHidden(hidden: boolean) {
+  localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? '1' : '0');
+}
+
 function syncSessionOrder(sessionIds: string[], existingOrder: string[]) {
   const presentIds = new Set(sessionIds);
   const nextOrder = existingOrder.filter((id) => presentIds.has(id));
@@ -189,6 +202,7 @@ export function App() {
   const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null);
   const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [sidebarHidden, setSidebarHidden] = useState(() => readSidebarHidden());
   const [touchMode, setTouchMode] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
@@ -235,6 +249,10 @@ export function App() {
     window.addEventListener('resize', updateTouchMode);
     return () => window.removeEventListener('resize', updateTouchMode);
   }, []);
+
+  useEffect(() => {
+    persistSidebarHidden(sidebarHidden);
+  }, [sidebarHidden]);
 
   const clearSessionUi = useCallback(() => {
     setSessions([]);
@@ -972,7 +990,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell" style={shellStyle}>
+    <div className={`app-shell ${sidebarHidden ? 'sidebar-hidden' : ''}`} style={shellStyle}>
       <aside className="session-sidebar">
         <div className="sidebar-header">
           <h1>
@@ -995,6 +1013,9 @@ export function App() {
             </button>
             <button className="logout-btn" onClick={handleLogout}>
               Logout
+            </button>
+            <button onClick={() => setSidebarHidden(true)} title="Hide session sidebar">
+              Hide
             </button>
           </div>
         </div>
@@ -1230,6 +1251,16 @@ export function App() {
       >
         <div className="sidebar-resizer-grip" />
       </div>
+
+      {sidebarHidden ? (
+        <button
+          className="sidebar-reveal-btn"
+          onClick={() => setSidebarHidden(false)}
+          title="Show session sidebar"
+        >
+          Sessions
+        </button>
+      ) : null}
 
       <main className="terminal-area">
         {activeSession ? (
