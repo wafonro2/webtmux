@@ -48,6 +48,17 @@ type WindowWithSpeechRecognition = Window & {
   SpeechRecognition?: SpeechRecognitionCtor;
   webkitSpeechRecognition?: SpeechRecognitionCtor;
 };
+type CommandModeRule = {
+  id: string;
+  spoken: string[];
+  output: string;
+  outputLabel: string;
+  description: string;
+};
+type CompiledCommandModeRule = CommandModeRule & {
+  pattern: RegExp;
+  maxWords: number;
+};
 
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
@@ -136,6 +147,130 @@ const KEYBOARD_DISPLAY: Record<string, string> = {
   '{f11}': 'F11',
   '{f12}': 'F12'
 };
+
+// Add entries here to extend spoken command replacements in Commands Mode.
+const COMMAND_MODE_RULES: CommandModeRule[] = [
+  {
+    id: 'run-last',
+    spoken: ['run last', 'repeat last'],
+    output: '!!',
+    outputLabel: '!!',
+    description: 'Run previous command'
+  },
+  {
+    id: 'list',
+    spoken: ['list'],
+    output: 'ls',
+    outputLabel: 'ls',
+    description: 'List files'
+  },
+  {
+    id: 'pipe',
+    spoken: ['pipe', 'bar'],
+    output: '|',
+    outputLabel: '|',
+    description: 'Pipe operator'
+  },
+  {
+    id: 'comma',
+    spoken: ['comma'],
+    output: ',',
+    outputLabel: ',',
+    description: 'Comma punctuation'
+  },
+  {
+    id: 'dot',
+    spoken: ['dot', 'dots', 'period'],
+    output: '.',
+    outputLabel: '.',
+    description: 'Dot punctuation'
+  },
+  {
+    id: 'enter',
+    spoken: ['enter'],
+    output: '\r',
+    outputLabel: '<ENTER>',
+    description: 'Press Enter'
+  },
+  {
+    id: 'arrow-up',
+    spoken: ['arrow up', 'up'],
+    output: '\x1b[A',
+    outputLabel: '<UP>',
+    description: 'Arrow Up'
+  },
+  {
+    id: 'arrow-down',
+    spoken: ['arrow down', 'down'],
+    output: '\x1b[B',
+    outputLabel: '<DOWN>',
+    description: 'Arrow Down'
+  },
+  {
+    id: 'arrow-left',
+    spoken: ['arrow left', 'left'],
+    output: '\x1b[D',
+    outputLabel: '<LEFT>',
+    description: 'Arrow Left'
+  },
+  {
+    id: 'arrow-right',
+    spoken: ['arrow right', 'right'],
+    output: '\x1b[C',
+    outputLabel: '<RIGHT>',
+    description: 'Arrow Right'
+  }
+];
+
+function escapeRegex(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function compileCommandModeRules() {
+  const compiled: CompiledCommandModeRule[] = COMMAND_MODE_RULES.map((rule) => {
+    const spokenPatterns = rule.spoken.map((phrase) =>
+      phrase
+        .trim()
+        .split(/\s+/)
+        .map((part) => escapeRegex(part))
+        .join('\\s+')
+    );
+
+    const maxWords = Math.max(...rule.spoken.map((phrase) => phrase.trim().split(/\s+/).length));
+    const pattern = new RegExp(`\\b(?:${spokenPatterns.join('|')})\\b`, 'gi');
+    return { ...rule, pattern, maxWords };
+  });
+
+  return compiled.sort((a, b) => b.maxWords - a.maxWords);
+}
+
+const COMMAND_MODE_RULES_COMPILED = compileCommandModeRules();
+
+function applyCommandModeTransforms(input: string) {
+  let output = input;
+
+  for (const rule of COMMAND_MODE_RULES_COMPILED) {
+    output = output.replace(rule.pattern, rule.output);
+  }
+
+  output = output.replace(/\s+([,.;:!?])/g, '$1');
+  output = output.replace(/\s*\|\s*/g, ' | ');
+  output = output.replace(/\s*(\x1b\[[ABCD])\s*/g, '$1');
+  output = output.replace(/[ \t]*\r[ \t]*/g, '\r');
+  output = output.replace(/[ \t]{2,}/g, ' ');
+  output = output.replace(/^[ \t]+|[ \t]+$/g, '');
+
+  return output;
+}
+
+function formatCommandOutputPreview(input: string) {
+  return input
+    .replace(/\x1b\[A/g, '<UP>')
+    .replace(/\x1b\[B/g, '<DOWN>')
+    .replace(/\x1b\[D/g, '<LEFT>')
+    .replace(/\x1b\[C/g, '<RIGHT>')
+    .replace(/\r/g, '<ENTER>');
+}
 
 function isTouchLike() {
   if (typeof window === 'undefined') {
@@ -301,6 +436,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const [speechFinalText, setSpeechFinalText] = useState('');
   const [speechPreviewText, setSpeechPreviewText] = useState('');
   const [speechSupported] = useState(() => Boolean(getSpeechRecognitionCtor()));
+  const [commandModeEnabled, setCommandModeEnabled] = useState(false);
+  const [commandListVisible, setCommandListVisible] = useState(false);
 
   useEffect(() => {
     const updateTouchMode = () => {
@@ -543,20 +680,33 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
   };
 
-  const stopSpeechInput = () => {
-    speechKeepAliveRef.current = false;
+  const releaseSpeechRecognition = (abort: boolean) => {
     const recognition = speechRecognitionRef.current;
     if (!recognition) {
-      setSpeechListening(false);
-      setKeyboardVisible(true);
       return;
     }
 
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+
     try {
-      recognition.stop();
+      if (abort) {
+        recognition.abort();
+      } else {
+        recognition.stop();
+      }
     } catch {
-      // Ignore invalid state if recognition has already stopped.
+      // Ignore state errors during speech recognizer teardown.
     }
+
+    speechRecognitionRef.current = null;
+  };
+
+  const stopSpeechInput = () => {
+    speechKeepAliveRef.current = false;
+    commitSpeechRun();
+    releaseSpeechRecognition(true);
 
     setSpeechListening(false);
     setKeyboardVisible(true);
@@ -617,6 +767,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       return;
     }
 
+    // Recreate recognizer each start to avoid stale Android background state.
+    releaseSpeechRecognition(true);
     speechKeepAliveRef.current = true;
     setSpeechError('');
     setSpeechFinalText('');
@@ -625,81 +777,77 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     speechFinalByIndexRef.current = new Map();
     setKeyboardVisible(false);
 
-    if (!speechRecognitionRef.current) {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.lang = navigator.language || 'en-US';
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.lang = navigator.language || 'en-US';
 
-      recognition.onresult = (event) => {
-        const speechEvent = event as SpeechRecognitionEventLike;
+    recognition.onresult = (event) => {
+      const speechEvent = event as SpeechRecognitionEventLike;
 
-        if (!speechEvent.results) {
+      if (!speechEvent.results) {
+        return;
+      }
+
+      for (let index = 0; index < speechEvent.results.length; index += 1) {
+        const result = speechEvent.results[index];
+        const transcript = result?.[0]?.transcript ?? '';
+        if (!transcript) {
+          continue;
+        }
+
+        if (result?.isFinal) {
+          speechFinalByIndexRef.current.set(index, transcript.trim());
+        }
+      }
+
+      updateSpeechPreviewText();
+    };
+
+    recognition.onerror = (event) => {
+      const speechErrorEvent = event as SpeechRecognitionErrorEventLike;
+      const reason = speechErrorEvent.error ?? 'unknown';
+      const recoverable = reason === 'no-speech' || reason === 'aborted';
+      if (!recoverable) {
+        speechKeepAliveRef.current = false;
+        setSpeechError(`Voice input error: ${reason}.`);
+        releaseSpeechRecognition(true);
+      }
+      if (!speechKeepAliveRef.current) {
+        setSpeechListening(false);
+      }
+    };
+
+    recognition.onend = () => {
+      commitSpeechRun();
+      if (speechKeepAliveRef.current) {
+        try {
+          recognition.start();
+          setSpeechListening(true);
+          return;
+        } catch {
+          window.setTimeout(() => {
+            if (!speechKeepAliveRef.current) {
+              return;
+            }
+            try {
+              recognition.start();
+              setSpeechListening(true);
+            } catch {
+              setSpeechListening(false);
+              releaseSpeechRecognition(true);
+            }
+          }, 120);
           return;
         }
+      }
+      setSpeechListening(false);
+      setKeyboardVisible(true);
+      releaseSpeechRecognition(false);
+    };
 
-        for (let index = 0; index < speechEvent.results.length; index += 1) {
-          const result = speechEvent.results[index];
-          const transcript = result?.[0]?.transcript ?? '';
-          if (!transcript) {
-            continue;
-          }
-
-          if (result?.isFinal) {
-            speechFinalByIndexRef.current.set(index, transcript.trim());
-          }
-        }
-
-        updateSpeechPreviewText();
-      };
-
-      recognition.onerror = (event) => {
-        const speechErrorEvent = event as SpeechRecognitionErrorEventLike;
-        const reason = speechErrorEvent.error ?? 'unknown';
-        const recoverable = reason === 'no-speech' || reason === 'aborted';
-        if (!recoverable) {
-          speechKeepAliveRef.current = false;
-          setSpeechError(`Voice input error: ${reason}.`);
-        }
-        if (!speechKeepAliveRef.current) {
-          setSpeechListening(false);
-        }
-      };
-
-      recognition.onend = () => {
-        commitSpeechRun();
-        if (speechKeepAliveRef.current) {
-          try {
-            recognition.start();
-            setSpeechListening(true);
-            return;
-          } catch {
-            window.setTimeout(() => {
-              if (!speechKeepAliveRef.current) {
-                return;
-              }
-              try {
-                recognition.start();
-                setSpeechListening(true);
-              } catch {
-                setSpeechListening(false);
-              }
-            }, 120);
-            return;
-          }
-        }
-        setSpeechListening(false);
-        setKeyboardVisible(true);
-      };
-
-      speechRecognitionRef.current = recognition;
-    }
-
-    const recognition = speechRecognitionRef.current;
-    if (!recognition) {
-      return;
-    }
+    speechRecognitionRef.current = recognition;
 
     recognition.lang = navigator.language || recognition.lang;
 
@@ -710,28 +858,42 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       speechKeepAliveRef.current = false;
       setSpeechError('Could not start voice input. Check mic permission and retry.');
       setSpeechListening(false);
+      releaseSpeechRecognition(true);
     }
   };
 
   useEffect(() => {
-    return () => {
-      const recognition = speechRecognitionRef.current;
-      if (!recognition) {
+    const handleAppHidden = () => {
+      if (!document.hidden) {
         return;
       }
 
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
       speechKeepAliveRef.current = false;
+      setSpeechListening(false);
+      setCommandListVisible(false);
+      releaseSpeechRecognition(true);
+    };
 
-      try {
-        recognition.abort();
-      } catch {
-        // Ignore abort errors during teardown.
-      }
+    const handlePageHide = () => {
+      speechKeepAliveRef.current = false;
+      setSpeechListening(false);
+      setCommandListVisible(false);
+      releaseSpeechRecognition(true);
+    };
 
-      speechRecognitionRef.current = null;
+    document.addEventListener('visibilitychange', handleAppHidden);
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleAppHidden);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      speechKeepAliveRef.current = false;
+      releaseSpeechRecognition(true);
     };
   }, []);
 
@@ -741,18 +903,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     setSpeechListening(false);
     setSpeechFinalText('');
     setSpeechPreviewText('');
+    setCommandListVisible(false);
     speechCommittedSegmentsRef.current = [];
     speechFinalByIndexRef.current = new Map();
-    const recognition = speechRecognitionRef.current;
-    if (!recognition) {
-      return;
-    }
-
-    try {
-      recognition.stop();
-    } catch {
-      // Ignore invalid state when switching sessions.
-    }
+    releaseSpeechRecognition(true);
   }, [sessionId]);
 
   const clearSpeechBuffer = () => {
@@ -779,10 +933,14 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   };
 
   const sendSpeechBuffer = (withEnter: boolean) => {
-    const buffered = speechFinalText.trim();
-    if (!buffered && !withEnter) {
+    const rawBuffered = speechFinalText.replace(/\s+/g, ' ').trim();
+    if (!rawBuffered && !withEnter) {
       return;
     }
+
+    const buffered = commandModeEnabled
+      ? applyCommandModeTransforms(rawBuffered)
+      : rawBuffered;
 
     if (buffered) {
       sendInput(buffered);
@@ -812,6 +970,19 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
 
     startSpeechInput();
   };
+
+  const commandOutputPreview = useMemo(() => {
+    if (!commandModeEnabled) {
+      return '';
+    }
+
+    const rawBuffered = speechFinalText.replace(/\s+/g, ' ').trim();
+    if (!rawBuffered) {
+      return '';
+    }
+
+    return formatCommandOutputPreview(applyCommandModeTransforms(rawBuffered));
+  }, [commandModeEnabled, speechFinalText]);
 
   const clearOneShotModifiers = () => {
     setModifiers({ ctrl: false, alt: false, shift: false });
@@ -978,9 +1149,51 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       ) : null}
       {touchMode && speechListening ? (
         <div className="terminal-voice-panel">
+          <div className="terminal-voice-mode-row">
+            <button
+              type="button"
+              className={`terminal-toolbar-btn ${commandModeEnabled ? 'mode-active' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setCommandModeEnabled((prev) => !prev)}
+            >
+              Commands: {commandModeEnabled ? 'On' : 'Off'}
+            </button>
+            <button
+              type="button"
+              className="terminal-toolbar-btn"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setCommandListVisible((prev) => !prev)}
+            >
+              {commandListVisible ? 'Hide Commands' : 'Show Commands'}
+            </button>
+          </div>
+
           <div className="terminal-voice-preview">
             {speechPreviewText.trim() || 'Listening...'}
           </div>
+
+          {commandModeEnabled ? (
+            <div className="terminal-command-preview">
+              <div className="terminal-command-label">Command Output</div>
+              <div className="terminal-command-value">
+                {commandOutputPreview || '(no command output yet)'}
+              </div>
+            </div>
+          ) : null}
+
+          {commandListVisible ? (
+            <div className="terminal-command-list">
+              {COMMAND_MODE_RULES.map((rule) => (
+                <div key={rule.id} className="terminal-command-item">
+                  <span className="terminal-command-spoken">{rule.spoken.join(' / ')}</span>
+                  <span className="terminal-command-arrow">{'->'}</span>
+                  <span className="terminal-command-output">{rule.outputLabel}</span>
+                  <span className="terminal-command-desc">{rule.description}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
           <div className="terminal-voice-actions">
             <button
               type="button"

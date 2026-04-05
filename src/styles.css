@@ -356,6 +356,12 @@ body,
   font-weight: 600;
 }
 
+.terminal-toolbar-btn.mode-active {
+  border-color: rgba(125, 211, 252, 0.75);
+  background: rgba(14, 116, 144, 0.7);
+  color: #e0f2fe;
+}
+
 .terminal-speech-error {
   color: #fecaca;
   font-size: 12px;
@@ -371,6 +377,13 @@ body,
   gap: 8px;
 }
 
+.terminal-voice-mode-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .terminal-voice-preview {
   color: #bfdbfe;
   font-size: 12px;
@@ -383,6 +396,70 @@ body,
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.terminal-command-preview {
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  border-radius: 8px;
+  background: rgba(14, 24, 38, 0.75);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.terminal-command-label {
+  font-size: 11px;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.terminal-command-value {
+  font-size: 12px;
+  color: #dbeafe;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.terminal-command-list {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(12, 20, 31, 0.75);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.terminal-command-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) auto auto minmax(0, 2.2fr);
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.terminal-command-spoken {
+  color: #c7d2fe;
+  overflow-wrap: anywhere;
+}
+
+.terminal-command-arrow {
+  color: #7dd3fc;
+}
+
+.terminal-command-output {
+  color: #bbf7d0;
+  font-family: 'IBM Plex Mono', monospace;
+  white-space: pre;
+}
+
+.terminal-command-desc {
+  color: #93a7c7;
+  overflow-wrap: anywhere;
 }
 
 .terminal-voice-actions {
