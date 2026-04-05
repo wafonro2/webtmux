@@ -67,6 +67,8 @@ type VoiceEngine = 'browser' | 'whisper';
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
+const TOUCH_TAP_THRESHOLD_PX = 10;
+const TOUCH_WHEEL_STEP_PX = 24;
 const WHISPER_SILENCE_INTERVAL_MS = 120;
 const WHISPER_SILENCE_HOLD_MS = 900;
 const WHISPER_SILENCE_RMS_THRESHOLD = 0.018;
@@ -569,13 +571,126 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       }
     };
 
+    let activeTouchId: number | null = null;
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchLastY = 0;
+    let touchMoved = false;
+    let touchWheelRemainder = 0;
+
+    const getTrackedTouch = (touches: TouchList, identifier: number | null) => {
+      if (touches.length === 0) {
+        return null;
+      }
+
+      if (identifier === null) {
+        return touches[0] ?? null;
+      }
+
+      for (let index = 0; index < touches.length; index += 1) {
+        const touch = touches[index];
+        if (touch.identifier === identifier) {
+          return touch;
+        }
+      }
+
+      return null;
+    };
+
     const handleTouchStart = (event: TouchEvent) => {
       if (!isTouchLike()) {
         return;
       }
 
+      if (event.touches.length !== 1) {
+        activeTouchId = null;
+        touchMoved = true;
+        return;
+      }
+
+      const touch = event.touches[0];
+      activeTouchId = touch.identifier;
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+      touchLastY = touch.clientY;
+      touchMoved = false;
+      touchWheelRemainder = 0;
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      if (!isTouchLike() || activeTouchId === null) {
+        return;
+      }
+
+      const touch = getTrackedTouch(event.touches, activeTouchId);
+      if (!touch) {
+        touchMoved = true;
+        return;
+      }
+
+      const deltaY = touchLastY - touch.clientY;
+      touchLastY = touch.clientY;
+
+      if (
+        Math.abs(touch.clientX - touchStartX) > TOUCH_TAP_THRESHOLD_PX ||
+        Math.abs(touch.clientY - touchStartY) > TOUCH_TAP_THRESHOLD_PX
+      ) {
+        touchMoved = true;
+      }
+
+      if (!touchMoved || deltaY === 0) {
+        return;
+      }
+
       event.preventDefault();
-      helperTextarea?.blur();
+      touchWheelRemainder += deltaY;
+
+      const wheelTarget = term.element ?? containerRef.current;
+      if (!wheelTarget) {
+        return;
+      }
+
+      while (Math.abs(touchWheelRemainder) >= TOUCH_WHEEL_STEP_PX) {
+        const wheelDelta = touchWheelRemainder > 0 ? TOUCH_WHEEL_STEP_PX : -TOUCH_WHEEL_STEP_PX;
+        touchWheelRemainder -= wheelDelta;
+        wheelTarget.dispatchEvent(
+          new WheelEvent('wheel', {
+            deltaY: wheelDelta,
+            deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+            bubbles: true,
+            cancelable: true,
+            clientX: touch.clientX,
+            clientY: touch.clientY
+          })
+        );
+      }
+    };
+
+    const handleTouchEnd = (event: TouchEvent) => {
+      if (!isTouchLike() || activeTouchId === null) {
+        return;
+      }
+
+      const touch = getTrackedTouch(event.changedTouches, activeTouchId);
+      const movedByDistance =
+        touch !== null &&
+        (Math.abs(touch.clientX - touchStartX) > TOUCH_TAP_THRESHOLD_PX ||
+          Math.abs(touch.clientY - touchStartY) > TOUCH_TAP_THRESHOLD_PX);
+
+      if (!touchMoved && !movedByDistance) {
+        event.preventDefault();
+        helperTextarea?.blur();
+      }
+
+      activeTouchId = null;
+      touchMoved = false;
+      touchWheelRemainder = 0;
+    };
+
+    const handleTouchCancel = () => {
+      activeTouchId = null;
+      touchMoved = false;
+      touchWheelRemainder = 0;
     };
 
     if (helperTextarea) {
@@ -587,7 +702,16 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
 
     containerRef.current.addEventListener('touchstart', handleTouchStart, {
+      passive: true
+    });
+    containerRef.current.addEventListener('touchmove', handleTouchMove, {
       passive: false
+    });
+    containerRef.current.addEventListener('touchend', handleTouchEnd, {
+      passive: false
+    });
+    containerRef.current.addEventListener('touchcancel', handleTouchCancel, {
+      passive: true
     });
 
     const storedSize = readStoredSize(sessionId);
@@ -738,6 +862,9 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       }
 
       containerRef.current?.removeEventListener('touchstart', handleTouchStart);
+      containerRef.current?.removeEventListener('touchmove', handleTouchMove);
+      containerRef.current?.removeEventListener('touchend', handleTouchEnd);
+      containerRef.current?.removeEventListener('touchcancel', handleTouchCancel);
       resizeObserver.disconnect();
       dataSubscription.dispose();
       ws.close();

@@ -16,6 +16,11 @@ body,
   height: 100%;
 }
 
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
 .auth-shell {
   width: 100%;
   height: 100%;
