@@ -14,6 +14,7 @@ Local tmux frontend with a web UI, password protection, and PWA install support.
 ## Requirements
 - Node.js + npm
 - `tmux` in `PATH`
+- Python 3 with `faster-whisper` installed (for local Whisper voice mode)
 
 ## Development
 1. Install dependencies:
@@ -36,6 +37,26 @@ npm run build
 WEBTMUX_PASSWORD='your-password' npm run start
 ```
 Open `http://localhost:3001`.
+
+## Local faster-whisper Setup
+Install local transcription runtime in your Python environment:
+```bash
+python3 -m pip install --upgrade faster-whisper
+```
+
+For NVIDIA GPUs (for example RTX 3090), ensure CUDA-enabled PyTorch/CTranslate2 deps are available in that Python environment.
+
+Speech endpoints used by the app:
+- `GET /api/speech/status`
+- `POST /api/speech/transcribe`
+
+Key env vars:
+- `WEBTMUX_PYTHON_BIN` (default `python3`)
+- `FASTER_WHISPER_MODEL` (default `large-v3-turbo`)
+- `FASTER_WHISPER_DEVICE` (`auto`, `cuda`, `cpu`)
+- `FASTER_WHISPER_COMPUTE_TYPE` (default `float16`)
+- `FASTER_WHISPER_BEAM_SIZE` (default `1`)
+- `FASTER_WHISPER_VAD_FILTER` (`1` or `0`)
 
 ## systemd Install
 Use the installer script (Linux):

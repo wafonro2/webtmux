@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
@@ -17,6 +18,13 @@ const SESSION_PREFIX = 'webtmux-';
 const AUTH_COOKIE_NAME = 'webtmux_auth';
 const DEFAULT_PASSWORD = 'changeme';
 const AUTH_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const PYTHON_BIN = process.env.WEBTMUX_PYTHON_BIN || 'python3';
+const FASTER_WHISPER_MODEL = process.env.FASTER_WHISPER_MODEL || 'large-v3-turbo';
+const FASTER_WHISPER_DEVICE = process.env.FASTER_WHISPER_DEVICE || 'auto';
+const FASTER_WHISPER_COMPUTE_TYPE = process.env.FASTER_WHISPER_COMPUTE_TYPE || 'float16';
+const FASTER_WHISPER_BEAM_SIZE = Number.parseInt(process.env.FASTER_WHISPER_BEAM_SIZE || '1', 10);
+const FASTER_WHISPER_VAD_FILTER = process.env.FASTER_WHISPER_VAD_FILTER !== '0';
+const FASTER_WHISPER_SCRIPT_PATH = path.join(__dirname, 'transcribe_faster_whisper.py');
 
 const configuredPassword = process.env.WEBTMUX_PASSWORD || DEFAULT_PASSWORD;
 if (!process.env.WEBTMUX_PASSWORD) {
@@ -120,6 +128,114 @@ function requireAuth(req, res, next) {
   }
 
   next();
+}
+
+let cachedWhisperDependency = {
+  checkedAtMs: 0,
+  ok: false,
+  error: ''
+};
+
+function checkFasterWhisperDependency() {
+  const now = Date.now();
+  if (now - cachedWhisperDependency.checkedAtMs < 60_000) {
+    return cachedWhisperDependency;
+  }
+
+  const result = spawnSync(PYTHON_BIN, ['-c', 'import faster_whisper'], {
+    encoding: 'utf8'
+  });
+
+  cachedWhisperDependency = {
+    checkedAtMs: now,
+    ok: result.status === 0,
+    error: result.status === 0 ? '' : (result.stderr || result.stdout || '').trim()
+  };
+
+  return cachedWhisperDependency;
+}
+
+function inferAudioExtension(contentType) {
+  if (!contentType) {
+    return 'webm';
+  }
+
+  if (contentType.includes('audio/webm')) {
+    return 'webm';
+  }
+  if (contentType.includes('audio/mp4')) {
+    return 'm4a';
+  }
+  if (contentType.includes('audio/ogg')) {
+    return 'ogg';
+  }
+  if (contentType.includes('audio/wav')) {
+    return 'wav';
+  }
+
+  return 'bin';
+}
+
+function runFasterWhisperTranscription({ audioPath, language }) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      FASTER_WHISPER_SCRIPT_PATH,
+      '--input',
+      audioPath,
+      '--model',
+      FASTER_WHISPER_MODEL,
+      '--device',
+      FASTER_WHISPER_DEVICE,
+      '--compute-type',
+      FASTER_WHISPER_COMPUTE_TYPE,
+      '--beam-size',
+      String(Number.isInteger(FASTER_WHISPER_BEAM_SIZE) && FASTER_WHISPER_BEAM_SIZE > 0 ? FASTER_WHISPER_BEAM_SIZE : 1),
+      '--vad-filter',
+      FASTER_WHISPER_VAD_FILTER ? '1' : '0'
+    ];
+
+    if (language) {
+      args.push('--language', language);
+    }
+
+    const child = spawn(PYTHON_BIN, args, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (error) => {
+      reject(error);
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `faster-whisper failed (${code}): ${(stderr || stdout || 'unknown error').trim()}`
+          )
+        );
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(stdout);
+        const text = typeof payload?.text === 'string' ? payload.text : '';
+        resolve(text);
+      } catch {
+        reject(new Error('Invalid transcription response from faster-whisper worker'));
+      }
+    });
+  });
 }
 
 function runTmux(args, options = {}) {
@@ -304,6 +420,71 @@ app.post('/api/auth/logout', (req, res) => {
   clearAuthCookie(res);
   res.status(204).send();
 });
+
+app.get('/api/speech/status', requireAuth, (_req, res) => {
+  const dependency = checkFasterWhisperDependency();
+
+  res.json({
+    configured: dependency.ok,
+    provider: 'faster-whisper',
+    model: FASTER_WHISPER_MODEL,
+    device: FASTER_WHISPER_DEVICE,
+    computeType: FASTER_WHISPER_COMPUTE_TYPE,
+    ...(dependency.ok ? {} : { error: dependency.error || 'faster_whisper import failed' })
+  });
+});
+
+app.post(
+  '/api/speech/transcribe',
+  requireAuth,
+  express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }),
+  async (req, res) => {
+    const dependency = checkFasterWhisperDependency();
+    if (!dependency.ok) {
+      res.status(503).json({
+        error:
+          dependency.error ||
+          'faster_whisper is not available. Install it in the server Python environment.'
+      });
+      return;
+    }
+
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'Audio payload is required.' });
+      return;
+    }
+
+    const contentType =
+      typeof req.headers['content-type'] === 'string'
+        ? req.headers['content-type']
+        : 'audio/webm';
+    const languageRaw = req.query.language;
+    const language =
+      typeof languageRaw === 'string' && languageRaw.trim()
+        ? languageRaw.trim().slice(0, 12)
+        : undefined;
+
+    const extension = inferAudioExtension(contentType);
+    const tempName = `webtmux-speech-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
+    const audioPath = path.join(os.tmpdir(), tempName);
+
+    try {
+      await fs.writeFile(audioPath, body);
+      const text = await runFasterWhisperTranscription({
+        audioPath,
+        language
+      });
+      res.json({ text });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to run local faster-whisper';
+      res.status(502).json({ error: message });
+    } finally {
+      await fs.rm(audioPath, { force: true }).catch(() => {});
+    }
+  }
+);
 
 app.get('/api/sessions', requireAuth, (_req, res) => {
   try {

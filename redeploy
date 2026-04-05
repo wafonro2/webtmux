@@ -3,6 +3,11 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_NAME="${1:-webtmux.service}"
+ENV_FILE="${WEBTMUX_ENV_FILE:-/etc/webtmux.env}"
+VENV_DIR="${WEBTMUX_VENV_DIR:-${APP_DIR}/.venv}"
+PYTHON_BOOTSTRAP_BIN="${WEBTMUX_BOOTSTRAP_PYTHON_BIN:-python3}"
+VENV_PYTHON="${VENV_DIR}/bin/python"
+VENV_PIP="${VENV_DIR}/bin/pip"
 
 cd "$APP_DIR"
 
@@ -16,11 +21,91 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Installing dependencies (if needed)..."
+if ! command -v "$PYTHON_BOOTSTRAP_BIN" >/dev/null 2>&1; then
+  echo "Error: ${PYTHON_BOOTSTRAP_BIN} is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "Creating python venv at ${VENV_DIR} ..."
+  "$PYTHON_BOOTSTRAP_BIN" -m venv "$VENV_DIR"
+fi
+
+echo "Installing local speech dependencies in venv ..."
+"$VENV_PIP" install --upgrade pip
+"$VENV_PIP" install --upgrade faster-whisper
+
+if [[ "${WEBTMUX_INSTALL_CUDA_WHEELS:-1}" == "1" ]]; then
+  echo "Installing CUDA runtime wheels for faster-whisper ..."
+  "$VENV_PIP" install --upgrade nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+fi
+
+echo "Installing Node dependencies (if needed)..."
 npm install
 
 echo "Building app..."
 npm run build
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Creating ${ENV_FILE} ..."
+  sudo install -m 600 -o root -g root /dev/null "$ENV_FILE"
+fi
+
+TMP_ENV_FILE="$(mktemp)"
+trap 'rm -f "$TMP_ENV_FILE"' EXIT
+sudo cat "$ENV_FILE" > "$TMP_ENV_FILE"
+
+upsert_env() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "$TMP_ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$TMP_ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$TMP_ENV_FILE"
+  fi
+}
+
+CUDA_LIB_PATHS="$(
+  "$VENV_PYTHON" -c 'import os
+paths = []
+for pkg in ("nvidia.cublas", "nvidia.cudnn"):
+  try:
+    mod = __import__(pkg, fromlist=["_"])
+    roots = list(getattr(mod, "__path__", []))
+    for root in roots:
+      candidate = os.path.join(root, "lib")
+      if os.path.isdir(candidate):
+        paths.append(candidate)
+  except Exception:
+    pass
+seen = []
+for entry in paths:
+  if entry not in seen:
+    seen.append(entry)
+print(":".join(seen))'
+)"
+
+EXISTING_LD_LIBRARY_PATH="$(grep '^LD_LIBRARY_PATH=' "$TMP_ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
+if [[ -n "$CUDA_LIB_PATHS" ]]; then
+  echo "Detected CUDA lib dirs: $CUDA_LIB_PATHS"
+  if [[ -n "$EXISTING_LD_LIBRARY_PATH" ]]; then
+    COMBINED_LD_LIBRARY_PATH="${CUDA_LIB_PATHS}:${EXISTING_LD_LIBRARY_PATH}"
+  else
+    COMBINED_LD_LIBRARY_PATH="$CUDA_LIB_PATHS"
+  fi
+  upsert_env "LD_LIBRARY_PATH" "$COMBINED_LD_LIBRARY_PATH"
+else
+  echo "Warning: CUDA library directories were not detected in the venv." >&2
+fi
+
+upsert_env "WEBTMUX_PYTHON_BIN" "$VENV_PYTHON"
+upsert_env "FASTER_WHISPER_MODEL" "${FASTER_WHISPER_MODEL:-large-v3-turbo}"
+upsert_env "FASTER_WHISPER_DEVICE" "${FASTER_WHISPER_DEVICE:-auto}"
+upsert_env "FASTER_WHISPER_COMPUTE_TYPE" "${FASTER_WHISPER_COMPUTE_TYPE:-float16}"
+upsert_env "FASTER_WHISPER_BEAM_SIZE" "${FASTER_WHISPER_BEAM_SIZE:-1}"
+upsert_env "FASTER_WHISPER_VAD_FILTER" "${FASTER_WHISPER_VAD_FILTER:-1}"
+
+sudo install -m 600 -o root -g root "$TMP_ENV_FILE" "$ENV_FILE"
 
 echo "Restarting ${SERVICE_NAME}..."
 sudo systemctl restart "${SERVICE_NAME}"

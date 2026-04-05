@@ -48,6 +48,9 @@ type WindowWithSpeechRecognition = Window & {
   SpeechRecognition?: SpeechRecognitionCtor;
   webkitSpeechRecognition?: SpeechRecognitionCtor;
 };
+type WindowWithAudioContext = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
 type CommandModeRule = {
   id: string;
   spoken: string[];
@@ -59,10 +62,14 @@ type CompiledCommandModeRule = CommandModeRule & {
   pattern: RegExp;
   maxWords: number;
 };
+type VoiceEngine = 'browser' | 'whisper';
 
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
+const WHISPER_SILENCE_INTERVAL_MS = 120;
+const WHISPER_SILENCE_HOLD_MS = 900;
+const WHISPER_SILENCE_RMS_THRESHOLD = 0.018;
 
 const ACTION_SEQUENCES: Record<string, string> = {
   esc: '\x1b',
@@ -272,6 +279,27 @@ function formatCommandOutputPreview(input: string) {
     .replace(/\r/g, '<ENTER>');
 }
 
+function getPreferredAudioMimeType() {
+  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
+    return null;
+  }
+
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus'
+  ];
+
+  for (const candidate of candidates) {
+    if (MediaRecorder.isTypeSupported(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function isTouchLike() {
   if (typeof window === 'undefined') {
     return false;
@@ -287,6 +315,15 @@ function getSpeechRecognitionCtor() {
 
   const speechWindow = window as WindowWithSpeechRecognition;
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
+function getAudioContextCtor() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const audioWindow = window as WindowWithAudioContext;
+  return audioWindow.AudioContext ?? audioWindow.webkitAudioContext ?? null;
 }
 
 function readStoredSize(sessionId: string): GridSize | null {
@@ -416,6 +453,15 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const adjustManualSizeRef = useRef<(deltaCols: number, deltaRows: number) => void>(() => {});
   const resetManualSizeRef = useRef<() => void>(() => {});
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const whisperRecorderRef = useRef<MediaRecorder | null>(null);
+  const whisperStreamRef = useRef<MediaStream | null>(null);
+  const whisperChunksRef = useRef<Blob[]>([]);
+  const whisperAudioContextRef = useRef<AudioContext | null>(null);
+  const whisperAnalyserRef = useRef<AnalyserNode | null>(null);
+  const whisperSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const whisperSilenceTimerRef = useRef<number | null>(null);
+  const whisperLastSpeechAtRef = useRef(0);
+  const whisperHeardSpeechRef = useRef(false);
   const speechFinalByIndexRef = useRef<Map<number, string>>(new Map());
   const speechCommittedSegmentsRef = useRef<string[]>([]);
   const speechKeepAliveRef = useRef(false);
@@ -435,9 +481,14 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const [speechError, setSpeechError] = useState('');
   const [speechFinalText, setSpeechFinalText] = useState('');
   const [speechPreviewText, setSpeechPreviewText] = useState('');
-  const [speechSupported] = useState(() => Boolean(getSpeechRecognitionCtor()));
+  const [browserSpeechSupported] = useState(() => Boolean(getSpeechRecognitionCtor()));
+  const [voiceEngine, setVoiceEngine] = useState<VoiceEngine>('browser');
+  const [whisperConfigured, setWhisperConfigured] = useState(false);
+  const [whisperBusy, setWhisperBusy] = useState(false);
+  const [whisperRecording, setWhisperRecording] = useState(false);
   const [commandModeEnabled, setCommandModeEnabled] = useState(false);
   const [commandListVisible, setCommandListVisible] = useState(false);
+  const speechSupported = browserSpeechSupported || whisperConfigured;
 
   useEffect(() => {
     const updateTouchMode = () => {
@@ -454,6 +505,37 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
 
     return () => {
       window.removeEventListener('resize', updateTouchMode);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSpeechStatus() {
+      try {
+        const response = await fetch('/api/speech/status');
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as { configured?: boolean };
+        if (cancelled) {
+          return;
+        }
+
+        const configured = Boolean(payload.configured);
+        setWhisperConfigured(configured);
+        if (configured) {
+          setVoiceEngine('whisper');
+        }
+      } catch {
+        // Keep browser speech as fallback.
+      }
+    }
+
+    loadSpeechStatus().catch(() => {});
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -703,8 +785,107 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     speechRecognitionRef.current = null;
   };
 
+  const clearWhisperSilenceWatcher = () => {
+    if (whisperSilenceTimerRef.current !== null) {
+      window.clearInterval(whisperSilenceTimerRef.current);
+      whisperSilenceTimerRef.current = null;
+    }
+
+    const source = whisperSourceRef.current;
+    if (source) {
+      try {
+        source.disconnect();
+      } catch {
+        // Ignore disconnect errors.
+      }
+    }
+    whisperSourceRef.current = null;
+
+    const analyser = whisperAnalyserRef.current;
+    if (analyser) {
+      try {
+        analyser.disconnect();
+      } catch {
+        // Ignore disconnect errors.
+      }
+    }
+    whisperAnalyserRef.current = null;
+
+    const audioContext = whisperAudioContextRef.current;
+    if (audioContext) {
+      audioContext.close().catch(() => {});
+    }
+    whisperAudioContextRef.current = null;
+
+    whisperLastSpeechAtRef.current = 0;
+    whisperHeardSpeechRef.current = false;
+  };
+
+  const releaseWhisperCapture = () => {
+    clearWhisperSilenceWatcher();
+
+    const recorder = whisperRecorderRef.current;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+      try {
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      } catch {
+        // Ignore recorder teardown errors.
+      }
+    }
+    whisperRecorderRef.current = null;
+
+    const stream = whisperStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // Ignore track stop errors.
+        }
+      }
+    }
+    whisperStreamRef.current = null;
+    whisperChunksRef.current = [];
+    setWhisperBusy(false);
+  };
+
   const stopSpeechInput = () => {
-    speechKeepAliveRef.current = false;
+    if (voiceEngine === 'whisper') {
+      if (whisperRecording) {
+        const recorder = whisperRecorderRef.current;
+        setWhisperRecording(false);
+        setWhisperBusy(true);
+        try {
+          if (recorder && recorder.state !== 'inactive') {
+            recorder.stop();
+          } else {
+            setWhisperBusy(false);
+          }
+        } catch {
+          setWhisperBusy(false);
+        }
+        return;
+      }
+
+      speechKeepAliveRef.current = false;
+      setWhisperBusy(false);
+      setWhisperRecording(false);
+      if (!whisperRecorderRef.current && !whisperStreamRef.current) {
+        setSpeechListening(false);
+        setKeyboardVisible(true);
+      } else {
+        releaseWhisperCapture();
+      }
+      setSpeechListening(false);
+      setKeyboardVisible(true);
+      return;
+    }
+
     commitSpeechRun();
     releaseSpeechRecognition(true);
 
@@ -758,7 +939,54 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     setSpeechPreviewText(buildSpeechPreviewText(''));
   };
 
-  const startSpeechInput = () => {
+  const appendSpeechSegment = (segment: string) => {
+    const cleaned = segment.trim();
+    if (!cleaned) {
+      return;
+    }
+    speechCommittedSegmentsRef.current.push(cleaned);
+    setSpeechFinalText(speechCommittedSegmentsRef.current.join(' ').trim());
+    setSpeechPreviewText(buildSpeechPreviewText(''));
+  };
+
+  const transcribeWhisperBlob = async (blob: Blob) => {
+    if (!blob.size) {
+      return;
+    }
+
+    setWhisperBusy(true);
+    try {
+      const language = (navigator.language || 'en-US').split('-')[0];
+      const response = await fetch(`/api/speech/transcribe?language=${encodeURIComponent(language)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': blob.type || 'audio/webm'
+        },
+        body: blob
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || 'Transcription failed');
+      }
+
+      const text = (payload.text || '').trim();
+      if (text) {
+        appendSpeechSegment(text);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Transcription failed';
+      setSpeechError(message);
+    } finally {
+      setWhisperBusy(false);
+    }
+  };
+
+  const startBrowserSpeechInput = () => {
+    releaseWhisperCapture();
+    setWhisperRecording(false);
+    setWhisperBusy(false);
+
     const SpeechRecognition = getSpeechRecognitionCtor();
     if (!SpeechRecognition) {
       speechKeepAliveRef.current = false;
@@ -862,6 +1090,174 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
   };
 
+  const startWhisperSpeechInput = async () => {
+    if (!whisperConfigured) {
+      setSpeechError('Whisper backend is not configured on the server.');
+      return;
+    }
+
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      setSpeechError('Audio recording is not supported in this browser.');
+      return;
+    }
+
+    if (whisperRecording || whisperBusy) {
+      return;
+    }
+
+    const isFreshSession = !speechListening;
+    releaseWhisperCapture();
+    speechKeepAliveRef.current = true;
+    setSpeechError('');
+    if (isFreshSession) {
+      setSpeechFinalText('');
+      setSpeechPreviewText('');
+      speechCommittedSegmentsRef.current = [];
+      speechFinalByIndexRef.current = new Map();
+    }
+    setKeyboardVisible(false);
+
+    const mimeType = getPreferredAudioMimeType();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          noiseSuppression: true,
+          echoCancellation: true
+        }
+      });
+
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      whisperStreamRef.current = stream;
+      whisperRecorderRef.current = recorder;
+      whisperChunksRef.current = [];
+      whisperLastSpeechAtRef.current = Date.now();
+      whisperHeardSpeechRef.current = false;
+
+      const AudioContextCtor = getAudioContextCtor();
+      if (AudioContextCtor) {
+        try {
+          const audioContext = new AudioContextCtor();
+          const analyser = audioContext.createAnalyser();
+          analyser.fftSize = 2048;
+          analyser.smoothingTimeConstant = 0.15;
+          const source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+
+          whisperAudioContextRef.current = audioContext;
+          whisperAnalyserRef.current = analyser;
+          whisperSourceRef.current = source;
+
+          const samples = new Uint8Array(analyser.fftSize);
+          whisperSilenceTimerRef.current = window.setInterval(() => {
+            if (recorder.state !== 'recording') {
+              return;
+            }
+
+            analyser.getByteTimeDomainData(samples);
+            let sumSquares = 0;
+            for (let index = 0; index < samples.length; index += 1) {
+              const normalized = (samples[index] - 128) / 128;
+              sumSquares += normalized * normalized;
+            }
+
+            const rms = Math.sqrt(sumSquares / samples.length);
+            if (rms >= WHISPER_SILENCE_RMS_THRESHOLD) {
+              whisperHeardSpeechRef.current = true;
+              whisperLastSpeechAtRef.current = Date.now();
+              return;
+            }
+
+            if (
+              whisperHeardSpeechRef.current &&
+              Date.now() - whisperLastSpeechAtRef.current >= WHISPER_SILENCE_HOLD_MS
+            ) {
+              whisperHeardSpeechRef.current = false;
+              setWhisperRecording(false);
+              setWhisperBusy(true);
+              try {
+                recorder.stop();
+              } catch {
+                setWhisperBusy(false);
+              }
+            }
+          }, WHISPER_SILENCE_INTERVAL_MS);
+        } catch {
+          // Silence detection is optional; recording still works without it.
+        }
+      }
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          whisperChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onerror = () => {
+        clearWhisperSilenceWatcher();
+        setSpeechError('Could not record audio.');
+        setWhisperRecording(false);
+        setWhisperBusy(false);
+        setSpeechListening(false);
+      };
+
+      recorder.onstop = () => {
+        clearWhisperSilenceWatcher();
+        const chunks = whisperChunksRef.current;
+        whisperChunksRef.current = [];
+
+        const recordedBlob = new Blob(chunks, {
+          type: recorder.mimeType || mimeType || 'audio/webm'
+        });
+
+        const activeStream = whisperStreamRef.current;
+        if (activeStream) {
+          for (const track of activeStream.getTracks()) {
+            try {
+              track.stop();
+            } catch {
+              // Ignore cleanup errors.
+            }
+          }
+        }
+        whisperStreamRef.current = null;
+        whisperRecorderRef.current = null;
+
+        transcribeWhisperBlob(recordedBlob)
+          .catch(() => {})
+          .finally(() => {
+            setWhisperBusy(false);
+          });
+      };
+
+      recorder.start(1000);
+      setSpeechListening(true);
+      setWhisperBusy(false);
+      setWhisperRecording(true);
+    } catch {
+      speechKeepAliveRef.current = false;
+      setSpeechError('Could not start voice input. Check mic permission and retry.');
+      setWhisperRecording(false);
+      setWhisperBusy(false);
+      setSpeechListening(false);
+      releaseWhisperCapture();
+    }
+  };
+
+  const startSpeechInput = () => {
+    if (voiceEngine === 'whisper') {
+      startWhisperSpeechInput().catch(() => {});
+      return;
+    }
+
+    startBrowserSpeechInput();
+  };
+
   useEffect(() => {
     const handleAppHidden = () => {
       if (!document.hidden) {
@@ -869,16 +1265,22 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       }
 
       speechKeepAliveRef.current = false;
+      setWhisperRecording(false);
+      setWhisperBusy(false);
       setSpeechListening(false);
       setCommandListVisible(false);
       releaseSpeechRecognition(true);
+      releaseWhisperCapture();
     };
 
     const handlePageHide = () => {
       speechKeepAliveRef.current = false;
+      setWhisperRecording(false);
+      setWhisperBusy(false);
       setSpeechListening(false);
       setCommandListVisible(false);
       releaseSpeechRecognition(true);
+      releaseWhisperCapture();
     };
 
     document.addEventListener('visibilitychange', handleAppHidden);
@@ -894,6 +1296,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     return () => {
       speechKeepAliveRef.current = false;
       releaseSpeechRecognition(true);
+      releaseWhisperCapture();
     };
   }, []);
 
@@ -904,9 +1307,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     setSpeechFinalText('');
     setSpeechPreviewText('');
     setCommandListVisible(false);
+    setWhisperRecording(false);
+    setWhisperBusy(false);
     speechCommittedSegmentsRef.current = [];
     speechFinalByIndexRef.current = new Map();
     releaseSpeechRecognition(true);
+    releaseWhisperCapture();
   }, [sessionId]);
 
   const clearSpeechBuffer = () => {
@@ -963,12 +1369,30 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   };
 
   const handleVoiceToggle = () => {
+    if (voiceEngine === 'whisper' && speechListening && !whisperRecording && !whisperBusy) {
+      startWhisperSpeechInput().catch(() => {});
+      return;
+    }
+
     if (speechListening) {
       stopSpeechInput();
       return;
     }
 
     startSpeechInput();
+  };
+
+  const switchVoiceEngine = (nextEngine: VoiceEngine) => {
+    if (nextEngine === voiceEngine) {
+      return;
+    }
+
+    if (speechListening) {
+      stopSpeechInput();
+    }
+
+    setSpeechError('');
+    setVoiceEngine(nextEngine);
   };
 
   const commandOutputPreview = useMemo(() => {
@@ -1138,7 +1562,15 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
               onMouseDown={(event) => event.preventDefault()}
               onClick={handleVoiceToggle}
             >
-              {speechListening ? 'Stop Voice' : 'Voice Input'}
+              {speechListening
+                ? voiceEngine === 'whisper'
+                  ? whisperRecording
+                    ? 'Stop Recording'
+                    : whisperBusy
+                      ? 'Transcribing...'
+                      : 'Record Again'
+                  : 'Stop Voice'
+                : 'Voice Input'}
             </button>
           ) : null}
         </div>
@@ -1150,6 +1582,23 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       {touchMode && speechListening ? (
         <div className="terminal-voice-panel">
           <div className="terminal-voice-mode-row">
+            <button
+              type="button"
+              className={`terminal-toolbar-btn ${voiceEngine === 'browser' ? 'mode-active' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => switchVoiceEngine('browser')}
+            >
+              Browser
+            </button>
+            <button
+              type="button"
+              className={`terminal-toolbar-btn ${voiceEngine === 'whisper' ? 'mode-active' : ''}`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => switchVoiceEngine('whisper')}
+              disabled={!whisperConfigured}
+            >
+              Whisper
+            </button>
             <button
               type="button"
               className={`terminal-toolbar-btn ${commandModeEnabled ? 'mode-active' : ''}`}
@@ -1169,7 +1618,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
           </div>
 
           <div className="terminal-voice-preview">
-            {speechPreviewText.trim() || 'Listening...'}
+            {speechPreviewText.trim() ||
+              (voiceEngine === 'whisper' && whisperBusy
+                ? 'Transcribing...'
+                : voiceEngine === 'whisper' && !whisperRecording
+                  ? 'Ready to send. Tap Record Again for another segment.'
+                  : 'Listening...')}
           </div>
 
           {commandModeEnabled ? (
@@ -1195,6 +1649,17 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
           ) : null}
 
           <div className="terminal-voice-actions">
+            {voiceEngine === 'whisper' && !whisperRecording ? (
+              <button
+                type="button"
+                className="terminal-toolbar-btn"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => startWhisperSpeechInput().catch(() => {})}
+                disabled={whisperBusy}
+              >
+                {whisperBusy ? 'Transcribing...' : 'Record'}
+              </button>
+            ) : null}
             <button
               type="button"
               className="terminal-toolbar-btn send-left"
@@ -1228,7 +1693,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
               onMouseDown={(event) => event.preventDefault()}
               onClick={stopSpeechInput}
             >
-              Stop Voice
+              {voiceEngine === 'whisper' && whisperRecording ? 'Stop Recording' : 'Close Voice'}
             </button>
             <button
               type="button"

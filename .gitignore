@@ -4,3 +4,6 @@ dist/
 .env.local
 .DS_Store
 npm-debug.log*
+.venv/
+__pycache__/
+*.pyc
