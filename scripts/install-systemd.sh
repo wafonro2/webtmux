@@ -33,6 +33,19 @@ if [[ -z "${WEBTMUX_PASSWORD:-}" ]]; then
   exit 1
 fi
 
+read_required_node_major() {
+  local default_major="${WEBTMUX_NODE_MAJOR:-20}"
+  if [[ -f "${APP_DIR}/.nvmrc" ]]; then
+    local raw
+    raw="$(tr -d '[:space:]' < "${APP_DIR}/.nvmrc")"
+    if [[ "${raw}" =~ ^([0-9]+) ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return
+    fi
+  fi
+  echo "${default_major}"
+}
+
 find_user_bin() {
   local binary_name="$1"
   local override_path="$2"
@@ -68,6 +81,15 @@ if [[ -z "${NODE_BIN}" || -z "${NPM_BIN}" || -z "${TMUX_BIN}" ]]; then
   echo "  tmux: ${TMUX_BIN:-<missing>}" >&2
   echo "If node/npm come from nvm, ensure they are available in the user's login shell," >&2
   echo "or pass explicit paths via WEBTMUX_NODE_BIN and WEBTMUX_NPM_BIN." >&2
+  exit 1
+fi
+
+REQUIRED_NODE_MAJOR="$(read_required_node_major)"
+NODE_MAJOR="$("${NODE_BIN}" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if [[ -z "${NODE_MAJOR}" || "${NODE_MAJOR}" -lt "${REQUIRED_NODE_MAJOR}" ]]; then
+  echo "Detected node binary is not compatible: ${NODE_BIN} ($("${NODE_BIN}" -v 2>/dev/null || echo 'unknown'))." >&2
+  echo "Node.js ${REQUIRED_NODE_MAJOR}+ is required." >&2
+  echo "Set WEBTMUX_NODE_BIN/WEBTMUX_NPM_BIN to Node ${REQUIRED_NODE_MAJOR}+ paths if needed." >&2
   exit 1
 fi
 

@@ -11,10 +11,64 @@ VENV_PIP="${VENV_DIR}/bin/pip"
 
 cd "$APP_DIR"
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "Error: npm is not installed or not in PATH." >&2
-  exit 1
-fi
+read_required_node_major() {
+  local default_major="${WEBTMUX_NODE_MAJOR:-20}"
+  if [[ -f "${APP_DIR}/.nvmrc" ]]; then
+    local raw
+    raw="$(tr -d '[:space:]' < "${APP_DIR}/.nvmrc")"
+    if [[ "${raw}" =~ ^([0-9]+) ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return
+    fi
+  fi
+  echo "${default_major}"
+}
+
+activate_nvm_if_needed() {
+  local required_major="$1"
+  local current_major=""
+  if command -v node >/dev/null 2>&1; then
+    current_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${current_major}" && "${current_major}" -ge "${required_major}" ]]; then
+    return
+  fi
+
+  local nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+  if [[ -s "${nvm_sh}" ]]; then
+    # shellcheck source=/dev/null
+    source "${nvm_sh}"
+    if [[ -f "${APP_DIR}/.nvmrc" ]]; then
+      nvm use --silent >/dev/null || true
+    fi
+  fi
+}
+
+ensure_node_and_npm() {
+  local required_major="$1"
+  activate_nvm_if_needed "${required_major}"
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Error: node is not installed or not in PATH." >&2
+    exit 1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "Error: npm is not installed or not in PATH." >&2
+    exit 1
+  fi
+
+  local node_major
+  node_major="$(node -p 'process.versions.node.split(".")[0]')"
+  if [[ "${node_major}" -lt "${required_major}" ]]; then
+    echo "Error: Node.js ${required_major}+ is required, current is $(node -v)." >&2
+    echo "Hint: run 'source ~/.nvm/nvm.sh && nvm use' in this repo." >&2
+    exit 1
+  fi
+}
+
+REQUIRED_NODE_MAJOR="$(read_required_node_major)"
+ensure_node_and_npm "${REQUIRED_NODE_MAJOR}"
 
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "Error: systemctl is not available on this machine." >&2
