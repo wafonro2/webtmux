@@ -67,6 +67,8 @@ type VoiceEngine = 'browser' | 'whisper';
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
+const PHONE_TERMINAL_FONT_SIZE = 10;
+const DEFAULT_TERMINAL_FONT_SIZE = 15;
 const TOUCH_TAP_THRESHOLD_PX = 10;
 const TOUCH_WHEEL_STEP_PX = 24;
 const WHISPER_SILENCE_INTERVAL_MS = 120;
@@ -317,6 +319,14 @@ function shouldAutoShowKeyboardAfterVoiceStop() {
   return !(coarsePointer && phoneWidth);
 }
 
+function isPhoneViewport() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return window.innerWidth <= 820;
+}
+
 function getSpeechRecognitionCtor() {
   if (typeof window === 'undefined') {
     return null;
@@ -556,6 +566,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const term = new Terminal({
       cursorBlink: true,
       convertEol: false,
+      fontSize: isPhoneViewport() ? PHONE_TERMINAL_FONT_SIZE : DEFAULT_TERMINAL_FONT_SIZE,
       theme: {
         background: '#0a101a',
         foreground: '#dce7ff'
@@ -1679,6 +1690,18 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     return themes;
   }, [keyboardViewport, modifiers, speechListening]);
 
+  const voiceToolbarLabel = speechListening
+    ? voiceEngine === 'whisper'
+      ? whisperRecording
+        ? 'Stop recording'
+        : whisperBusy
+          ? 'Transcribing'
+          : 'Record again'
+      : 'Stop voice'
+    : 'Voice input';
+  const voiceReadyToResume =
+    speechListening && voiceEngine === 'whisper' && !whisperRecording && !whisperBusy;
+
   return (
     <div className="terminal-frame">
       <div ref={containerRef} className="terminal-pane" />
@@ -1715,26 +1738,55 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={handleKeyboardToggle}
+            onClick={() => adjustManualSizeRef.current(-4, -2)}
+            title="Smaller terminal"
+            aria-label="Smaller terminal"
           >
-            {keyboardVisible ? 'Hide Keyboard' : 'Show Keyboard'}
+            -
+          </button>
+          <button
+            type="button"
+            className="terminal-toolbar-btn"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => adjustManualSizeRef.current(4, 2)}
+            title="Larger terminal"
+            aria-label="Larger terminal"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className={`terminal-toolbar-btn ${keyboardVisible ? 'mode-active' : ''}`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={handleKeyboardToggle}
+            title={keyboardVisible ? 'Hide keyboard' : 'Show keyboard'}
+            aria-label={keyboardVisible ? 'Hide keyboard' : 'Show keyboard'}
+          >
+            ⌨
           </button>
           {speechSupported ? (
             <button
               type="button"
-              className={`terminal-toolbar-btn ${speechListening ? 'listening' : ''}`}
+              className={`terminal-toolbar-btn ${
+                voiceReadyToResume ? 'success' : speechListening ? 'listening' : ''
+              }`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={handleVoiceToggle}
+              title={voiceToolbarLabel}
+              aria-label={voiceToolbarLabel}
             >
-              {speechListening
-                ? voiceEngine === 'whisper'
-                  ? whisperRecording
-                    ? 'Stop Recording'
-                    : whisperBusy
-                      ? 'Transcribing...'
-                      : 'Record Again'
-                  : 'Stop Voice'
-                : 'Voice Input'}
+              {speechListening && !voiceReadyToResume ? (
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <path d="M7 7h10v10H7z" fill="currentColor" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <path
+                    d="M12 15a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a1 1 0 0 1 2 0 7 7 0 0 1-6 6.93V21h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-2.07A7 7 0 0 1 5 12a1 1 0 1 1 2 0 5 5 0 1 0 10 0z"
+                    fill="currentColor"
+                  />
+                </svg>
+              )}
             </button>
           ) : null}
         </div>
