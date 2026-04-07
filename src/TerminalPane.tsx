@@ -427,8 +427,8 @@ function unwrapToken(button: string) {
 function buildAlphaRows(uppercase: boolean, viewport: KeyboardViewport) {
   const lastRow =
     viewport === 'phone'
-      ? '{sym} {ctrl} {alt} {space} {enter}'
-      : '{sym} {ctrl} {alt} / {space} {enter}';
+      ? '{sym} {ctrl} {alt} {space} , . {enter}'
+      : '{sym} {ctrl} {alt} / {space} , . {enter}';
 
   if (uppercase) {
     return [

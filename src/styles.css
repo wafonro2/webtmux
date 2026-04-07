@@ -671,9 +671,9 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-space {
-  flex-basis: calc(var(--vk-key-width, 40px) * 4.6);
-  width: calc(var(--vk-key-width, 40px) * 4.6);
-  min-width: calc(var(--vk-key-width, 40px) * 4.6);
+  flex-basis: calc(var(--vk-key-width, 40px) * 5.2);
+  width: calc(var(--vk-key-width, 40px) * 5.2);
+  min-width: calc(var(--vk-key-width, 40px) * 5.2);
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-enter,
@@ -709,9 +709,9 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-space {
-  flex-basis: calc(var(--vk-key-width, 24px) * 3.4);
-  width: calc(var(--vk-key-width, 24px) * 3.4);
-  min-width: calc(var(--vk-key-width, 24px) * 3.4);
+  flex-basis: calc(var(--vk-key-width, 24px) * 4.8);
+  width: calc(var(--vk-key-width, 24px) * 4.8);
+  min-width: calc(var(--vk-key-width, 24px) * 4.8);
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-enter,
