@@ -67,8 +67,24 @@ type VoiceEngine = 'browser' | 'whisper';
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
-const PHONE_TERMINAL_FONT_SIZE = 10;
+const PHONE_TERMINAL_FONT_SIZE = 8;
 const DEFAULT_TERMINAL_FONT_SIZE = 15;
+const POWERLINE_FONT_FAMILY = [
+  "'WebtmuxNerdMono'",
+  "'MesloLGS NF'",
+  "'CaskaydiaCove Nerd Font'",
+  "'JetBrainsMono Nerd Font'",
+  "'Hack Nerd Font'",
+  "'SauceCodePro Nerd Font'",
+  "'FiraCode Nerd Font'",
+  "'Symbols Nerd Font Mono'",
+  "'PowerlineSymbols'",
+  "'Noto Sans Mono'",
+  "'DejaVu Sans Mono'",
+  "'Menlo'",
+  "'Consolas'",
+  'monospace'
+].join(', ');
 const TOUCH_TAP_THRESHOLD_PX = 10;
 const TOUCH_MOVE_CANCEL_SELECTION_PX = 10;
 const TOUCH_WHEEL_STEP_PX = 24;
@@ -570,7 +586,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const term = new Terminal({
       cursorBlink: true,
       convertEol: false,
+      customGlyphs: true,
+      rescaleOverlappingGlyphs: true,
       fontSize: isPhoneViewport() ? PHONE_TERMINAL_FONT_SIZE : DEFAULT_TERMINAL_FONT_SIZE,
+      fontFamily: POWERLINE_FONT_FAMILY,
       theme: {
         background: '#0a101a',
         foreground: '#dce7ff'

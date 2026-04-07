@@ -1,5 +1,26 @@
+/* Bundled Nerd Font fallback for Powerline glyph coverage in browser terminals. */
+@font-face {
+  font-family: 'WebtmuxNerdMono';
+  src: url('nf-ubuntu-mono/Ubuntu Mono Nerd Font Complete Mono.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'WebtmuxNerdMono';
+  src: url('nf-ubuntu-mono/Ubuntu Mono Bold Nerd Font Complete Mono.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
 :root {
   font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --terminal-font-family: 'WebtmuxNerdMono', 'MesloLGS NF', 'CaskaydiaCove Nerd Font', 'JetBrainsMono Nerd Font',
+    'Hack Nerd Font', 'SauceCodePro Nerd Font', 'FiraCode Nerd Font',
+    'Symbols Nerd Font Mono', 'PowerlineSymbols', 'Noto Sans Mono', 'DejaVu Sans Mono',
+    'Menlo', 'Consolas', monospace;
   color: #eaf1ff;
   background: radial-gradient(circle at top left, #1e2a45 0%, #0f1726 45%, #080d15 100%);
 }
@@ -442,6 +463,12 @@ body {
   min-height: 0;
   border-radius: 8px;
   overflow: auto;
+  font-family: var(--terminal-font-family);
+}
+
+.terminal-pane .xterm,
+.terminal-pane .xterm .xterm-helper-textarea {
+  font-family: var(--terminal-font-family);
 }
 
 .terminal-toolbar {
