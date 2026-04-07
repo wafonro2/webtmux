@@ -605,6 +605,24 @@ body {
   padding: 8px 8px 6px;
 }
 
+.terminal-keyboard.phone {
+  padding: 0;
+  margin-left: -10px;
+  margin-right: -10px;
+  border-left: 0;
+  border-right: 0;
+  border-radius: 0;
+}
+
+.terminal-keyboard.phone .webtmux-keyboard.hg-theme-default {
+  max-width: 100%;
+  margin: 0;
+}
+
+.terminal-keyboard.phone .webtmux-keyboard.webtmux-phone .hg-row {
+  justify-content: center;
+}
+
 .keyboard-loading {
   padding: 10px 12px;
   color: #b7c4dd;
@@ -679,14 +697,14 @@ body {
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone {
   --vk-key-width: clamp(24px, 6.8vw, 30px);
-  --vk-key-height: 40px;
-  --vk-font-size: 12px;
+  --vk-key-height: 30px;
+  --vk-font-size: 13px;
   width: 100%;
   max-width: 100%;
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-row {
-  gap: 2px;
+  gap: 1px;
   margin-bottom: 2px;
 }
 

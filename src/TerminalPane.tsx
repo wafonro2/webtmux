@@ -70,7 +70,9 @@ const MIN_ROWS = 6;
 const PHONE_TERMINAL_FONT_SIZE = 10;
 const DEFAULT_TERMINAL_FONT_SIZE = 15;
 const TOUCH_TAP_THRESHOLD_PX = 10;
+const TOUCH_MOVE_CANCEL_SELECTION_PX = 10;
 const TOUCH_WHEEL_STEP_PX = 24;
+const TOUCH_SELECTION_HOLD_MS = 200;
 const WHISPER_SILENCE_INTERVAL_MS = 120;
 const WHISPER_SILENCE_HOLD_MS = 900;
 const WHISPER_SILENCE_RMS_THRESHOLD = 0.018;
@@ -135,6 +137,7 @@ const KEYBOARD_DISPLAY: Record<string, string> = {
   '{enter}': 'Enter',
   '{space}': 'Space',
   '{shift}': 'Shift',
+  '{caps}': 'Caps',
   '{ctrl}': 'Ctrl',
   '{alt}': 'Alt',
   '{abc}': 'ABC',
@@ -421,24 +424,24 @@ function unwrapToken(button: string) {
   return null;
 }
 
-function buildAlphaRows(shift: boolean, viewport: KeyboardViewport) {
+function buildAlphaRows(uppercase: boolean, viewport: KeyboardViewport) {
   const lastRow =
     viewport === 'phone'
       ? '{sym} {ctrl} {alt} {space} {enter}'
       : '{sym} {ctrl} {alt} / {space} {enter}';
 
-  if (shift) {
+  if (uppercase) {
     return [
-      'Q W E R T Y U I O P',
-      '{tab} A S D F G H J K L',
+      '{tab} Q W E R T Y U I O P',
+      '{caps} A S D F G H J K L',
       '{shift} Z X C V B N M {bksp}',
       lastRow
     ];
   }
 
   return [
-    'q w e r t y u i o p',
-    '{tab} a s d f g h j k l',
+    '{tab} q w e r t y u i o p',
+    '{caps} a s d f g h j k l',
     '{shift} z x c v b n m {bksp}',
     lastRow
   ];
@@ -496,6 +499,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     alt: false,
     shift: false
   });
+  const [capsLock, setCapsLock] = useState(false);
   const [speechListening, setSpeechListening] = useState(false);
   const [speechError, setSpeechError] = useState('');
   const [speechFinalText, setSpeechFinalText] = useState('');
@@ -593,8 +597,58 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     let touchStartX = 0;
     let touchStartY = 0;
     let touchLastY = 0;
+    let touchCurrentX = 0;
+    let touchCurrentY = 0;
     let touchMoved = false;
     let touchWheelRemainder = 0;
+    let touchSelectionIntent = false;
+    let touchSelectionDragging = false;
+    let touchSelectionTimer: number | null = null;
+
+    const clearTouchSelectionTimer = () => {
+      if (touchSelectionTimer !== null) {
+        window.clearTimeout(touchSelectionTimer);
+        touchSelectionTimer = null;
+      }
+    };
+
+    const clampPointToBounds = (target: HTMLElement, clientX: number, clientY: number) => {
+      const bounds = target.getBoundingClientRect();
+      const minClientX = bounds.left + 1;
+      const maxClientX = bounds.right - 1;
+      const minClientY = bounds.top + 1;
+      const maxClientY = bounds.bottom - 1;
+      const clampedX =
+        minClientX <= maxClientX
+          ? Math.min(maxClientX, Math.max(minClientX, clientX))
+          : clientX;
+      const clampedY =
+        minClientY <= maxClientY
+          ? Math.min(maxClientY, Math.max(minClientY, clientY))
+          : clientY;
+
+      return { x: clampedX, y: clampedY };
+    };
+
+    const dispatchSelectionMouseEvent = (
+      target: HTMLElement,
+      type: 'mousedown' | 'mousemove' | 'mouseup',
+      clientX: number,
+      clientY: number,
+      buttons: 0 | 1
+    ) => {
+      const point = clampPointToBounds(target, clientX, clientY);
+      target.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons,
+          clientX: point.x,
+          clientY: point.y
+        })
+      );
+    };
 
     const getTrackedTouch = (touches: TouchList, identifier: number | null) => {
       if (touches.length === 0) {
@@ -623,6 +677,9 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       if (event.touches.length !== 1) {
         activeTouchId = null;
         touchMoved = true;
+        touchSelectionIntent = false;
+        touchSelectionDragging = false;
+        clearTouchSelectionTimer();
         return;
       }
 
@@ -631,8 +688,27 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       touchStartX = touch.clientX;
       touchStartY = touch.clientY;
       touchLastY = touch.clientY;
+      touchCurrentX = touch.clientX;
+      touchCurrentY = touch.clientY;
       touchMoved = false;
       touchWheelRemainder = 0;
+      touchSelectionIntent = false;
+      clearTouchSelectionTimer();
+      touchSelectionTimer = window.setTimeout(() => {
+        touchSelectionIntent = true;
+        const selectionTarget = term.element ?? containerRef.current;
+        if (selectionTarget && activeTouchId !== null && !touchSelectionDragging) {
+          dispatchSelectionMouseEvent(
+            selectionTarget,
+            'mousedown',
+            touchCurrentX,
+            touchCurrentY,
+            1
+          );
+          touchSelectionDragging = true;
+        }
+        touchSelectionTimer = null;
+      }, TOUCH_SELECTION_HOLD_MS);
     };
 
     const handleTouchMove = (event: TouchEvent) => {
@@ -645,15 +721,48 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         touchMoved = true;
         return;
       }
+      touchCurrentX = touch.clientX;
+      touchCurrentY = touch.clientY;
 
       const deltaY = touchLastY - touch.clientY;
       touchLastY = touch.clientY;
+      const deltaFromStartX = Math.abs(touch.clientX - touchStartX);
+      const deltaFromStartY = Math.abs(touch.clientY - touchStartY);
 
       if (
-        Math.abs(touch.clientX - touchStartX) > TOUCH_TAP_THRESHOLD_PX ||
-        Math.abs(touch.clientY - touchStartY) > TOUCH_TAP_THRESHOLD_PX
+        deltaFromStartX > TOUCH_MOVE_CANCEL_SELECTION_PX ||
+        deltaFromStartY > TOUCH_MOVE_CANCEL_SELECTION_PX
       ) {
+        clearTouchSelectionTimer();
+      }
+
+      if (deltaFromStartX > TOUCH_TAP_THRESHOLD_PX || deltaFromStartY > TOUCH_TAP_THRESHOLD_PX) {
         touchMoved = true;
+      }
+
+      if (touchSelectionIntent) {
+        event.preventDefault();
+        const selectionTarget = term.element ?? containerRef.current;
+        if (selectionTarget) {
+          if (!touchSelectionDragging) {
+            dispatchSelectionMouseEvent(
+              selectionTarget,
+              'mousedown',
+              touchStartX,
+              touchStartY,
+              1
+            );
+            touchSelectionDragging = true;
+          }
+          dispatchSelectionMouseEvent(
+            selectionTarget,
+            'mousemove',
+            touch.clientX,
+            touch.clientY,
+            1
+          );
+        }
+        return;
       }
 
       if (!touchMoved || deltaY === 0) {
@@ -668,6 +777,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         return;
       }
 
+      const wheelPoint = clampPointToBounds(wheelTarget, touch.clientX, touch.clientY);
+
       while (Math.abs(touchWheelRemainder) >= TOUCH_WHEEL_STEP_PX) {
         const wheelDelta = touchWheelRemainder > 0 ? TOUCH_WHEEL_STEP_PX : -TOUCH_WHEEL_STEP_PX;
         touchWheelRemainder -= wheelDelta;
@@ -677,8 +788,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             deltaMode: WheelEvent.DOM_DELTA_PIXEL,
             bubbles: true,
             cancelable: true,
-            clientX: touch.clientX,
-            clientY: touch.clientY
+            clientX: wheelPoint.x,
+            clientY: wheelPoint.y
           })
         );
       }
@@ -694,6 +805,27 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         touch !== null &&
         (Math.abs(touch.clientX - touchStartX) > TOUCH_TAP_THRESHOLD_PX ||
           Math.abs(touch.clientY - touchStartY) > TOUCH_TAP_THRESHOLD_PX);
+      clearTouchSelectionTimer();
+
+      if (touchSelectionIntent || touchSelectionDragging) {
+        event.preventDefault();
+        const selectionTarget = term.element ?? containerRef.current;
+        if (selectionTarget) {
+          dispatchSelectionMouseEvent(
+            selectionTarget,
+            'mouseup',
+            touch?.clientX ?? touchStartX,
+            touch?.clientY ?? touchStartY,
+            0
+          );
+        }
+        activeTouchId = null;
+        touchMoved = false;
+        touchWheelRemainder = 0;
+        touchSelectionIntent = false;
+        touchSelectionDragging = false;
+        return;
+      }
 
       if (!touchMoved && !movedByDistance) {
         event.preventDefault();
@@ -703,12 +835,23 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       activeTouchId = null;
       touchMoved = false;
       touchWheelRemainder = 0;
+      touchSelectionIntent = false;
+      touchSelectionDragging = false;
     };
 
     const handleTouchCancel = () => {
+      clearTouchSelectionTimer();
+      if (touchSelectionDragging) {
+        const selectionTarget = term.element ?? containerRef.current;
+        if (selectionTarget) {
+          dispatchSelectionMouseEvent(selectionTarget, 'mouseup', touchStartX, touchStartY, 0);
+        }
+      }
       activeTouchId = null;
       touchMoved = false;
       touchWheelRemainder = 0;
+      touchSelectionIntent = false;
+      touchSelectionDragging = false;
     };
 
     if (helperTextarea) {
@@ -879,6 +1022,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         helperTextarea.removeEventListener('focus', handleNativeFocus);
       }
 
+      clearTouchSelectionTimer();
       containerRef.current?.removeEventListener('touchstart', handleTouchStart);
       containerRef.current?.removeEventListener('touchmove', handleTouchMove);
       containerRef.current?.removeEventListener('touchend', handleTouchEnd);
@@ -892,6 +1036,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       adjustManualSizeRef.current = () => {};
       resetManualSizeRef.current = () => {};
       setModifiers({ ctrl: false, alt: false, shift: false });
+      setCapsLock(false);
     };
   }, [sessionId]);
 
@@ -923,6 +1068,36 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const manualText = window.prompt('Paste text');
     if (manualText) {
       sendInput(manualText);
+    }
+  };
+
+  const copySelection = async () => {
+    const selected = termRef.current?.getSelection() ?? '';
+    if (!selected) {
+      return;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(selected);
+        return;
+      } catch {
+        // Fall through to legacy copy command.
+      }
+    }
+
+    const helper = document.createElement('textarea');
+    helper.value = selected;
+    helper.setAttribute('readonly', '');
+    helper.style.position = 'fixed';
+    helper.style.top = '-9999px';
+    helper.style.left = '-9999px';
+    document.body.appendChild(helper);
+    helper.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(helper);
     }
   };
 
@@ -1585,7 +1760,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   };
 
   const sendCharacter = (key: string) => {
-    let value = modifiers.shift ? key.toUpperCase() : key;
+    const useUppercase = modifiers.shift !== capsLock;
+    let value = useUppercase ? key.toUpperCase() : key;
 
     if (modifiers.ctrl) {
       const ctrl = toCtrlChar(value);
@@ -1631,6 +1807,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       return;
     }
 
+    if (token === 'caps') {
+      setCapsLock((prev) => !prev);
+      setModifiers((prev) => ({ ...prev, shift: false }));
+      return;
+    }
+
     if (token === 'sym') {
       setKeyboardMode('sym');
       return;
@@ -1671,17 +1853,18 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const navRows = keyboardViewport === 'phone' ? NAV_ROWS_PHONE : NAV_ROWS_TABLET;
     const contentRows =
       keyboardMode === 'abc'
-        ? buildAlphaRows(modifiers.shift, keyboardViewport)
+        ? buildAlphaRows(modifiers.shift !== capsLock, keyboardViewport)
         : buildSymbolRows(keyboardViewport);
     const utilityRow = speechSupported ? '{fit} {mic} {hide}' : '{fit} {hide}';
     return [...navRows, ...contentRows, utilityRow];
-  }, [keyboardMode, keyboardViewport, modifiers.shift, speechSupported]);
+  }, [capsLock, keyboardMode, keyboardViewport, modifiers.shift, speechSupported]);
 
   const buttonTheme = useMemo(() => {
     const activeButtons = [
       modifiers.ctrl ? '{ctrl}' : '',
       modifiers.alt ? '{alt}' : '',
       modifiers.shift ? '{shift}' : '',
+      capsLock ? '{caps}' : '',
       speechListening ? '{mic}' : ''
     ]
       .filter(Boolean)
@@ -1702,12 +1885,12 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
         : '{esc} {tab} {home} {end} {pgup} {pgdn} {ins} {del} {left} {up} {down} {right} {f1} {f2} {f3} {f4} {f5} {f6} {f7} {f8} {f9} {f10} {f11} {f12} {fit} {mic} {hide}';
     themes.push({
       class: 'vk-mod',
-      buttons: '{shift} {ctrl} {alt} {abc} {sym} {fit} {mic} {hide}'
+      buttons: '{shift} {caps} {ctrl} {alt} {abc} {sym} {fit} {mic} {hide}'
     });
     themes.push({ class: 'vk-nav', buttons: navButtons });
 
     return themes;
-  }, [keyboardViewport, modifiers, speechListening]);
+  }, [capsLock, keyboardViewport, modifiers, speechListening]);
 
   const voiceToolbarLabel = speechListening
     ? voiceEngine === 'whisper'
@@ -1731,27 +1914,18 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => sendAction('up')}
-            aria-label="Arrow up"
+            onClick={() => {
+              copySelection().catch(() => {});
+            }}
+            title="Copy selected text"
+            aria-label="Copy selected text"
           >
-            ↑
-          </button>
-          <button
-            type="button"
-            className="terminal-toolbar-btn"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => sendAction('down')}
-            aria-label="Arrow down"
-          >
-            ↓
-          </button>
-          <button
-            type="button"
-            className="terminal-toolbar-btn"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => sendAction('enter')}
-          >
-            Enter
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M8 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zm0 2v10h10V10H8zM4 4h10a2 2 0 0 1 2 2v1h-2V6H4v10h1v2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"
+                fill="currentColor"
+              />
+            </svg>
           </button>
           <button
             type="button"
@@ -1774,21 +1948,34 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => adjustManualSizeRef.current(-4, -2)}
-            title="Smaller terminal"
-            aria-label="Smaller terminal"
+            onClick={() => sendAction('up')}
+            aria-label="Arrow up"
           >
-            -
+            ↑
           </button>
           <button
             type="button"
             className="terminal-toolbar-btn"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => adjustManualSizeRef.current(4, 2)}
-            title="Larger terminal"
-            aria-label="Larger terminal"
+            onClick={() => sendAction('down')}
+            aria-label="Arrow down"
           >
-            +
+            ↓
+          </button>
+          <button
+            type="button"
+            className="terminal-toolbar-btn"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => sendAction('enter')}
+            title="Enter"
+            aria-label="Enter"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M4 5a1 1 0 0 1 1-1h7a1 1 0 1 1 0 2H6v6h10.59l-2.3-2.29a1 1 0 1 1 1.42-1.42l4 4a1 1 0 0 1 0 1.42l-4 4a1 1 0 1 1-1.42-1.42L16.59 14H5a1 1 0 0 1-1-1V5z"
+                fill="currentColor"
+              />
+            </svg>
           </button>
           <button
             type="button"
@@ -1960,7 +2147,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       ) : null}
 
       {touchMode && keyboardVisible && !speechListening ? (
-        <div className="terminal-keyboard">
+        <div className={`terminal-keyboard ${keyboardViewport === 'phone' ? 'phone' : ''}`}>
           <Suspense fallback={<div className="keyboard-loading">Loading keyboard...</div>}>
             <VirtualKeyboard
               rows={keyboardRows}
