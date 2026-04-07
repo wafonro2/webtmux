@@ -399,6 +399,18 @@ function configureTmuxSessionAlerts(sessionId) {
 
 function configureManagedSessionAlerts() {
   try {
+    runTmux(['set-option', '-g', 'mouse', 'on']);
+  } catch {
+    // Ignore global option failures.
+  }
+
+  try {
+    runTmux(['set-option', '-g', 'history-limit', '50000']);
+  } catch {
+    // Ignore global option failures.
+  }
+
+  try {
     runTmux(['set-option', '-gw', 'monitor-activity', 'on']);
   } catch {
     // Ignore global option failures.

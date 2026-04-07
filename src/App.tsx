@@ -27,6 +27,7 @@ const SESSION_ACTIVITY_SEEN_KEY = 'webtmux-session-activity-seen';
 const SESSION_SNAPSHOT_KEY = 'webtmux-session-snapshot';
 const SESSION_ALERT_SEEN_KEY = 'webtmux-session-alert-seen';
 const SIDEBAR_HIDDEN_KEY = 'webtmux-sidebar-hidden';
+const SOUND_ALERTS_ENABLED_KEY = 'webtmux-sound-alerts-enabled';
 
 function readSessionOrder(): string[] {
   try {
@@ -146,6 +147,22 @@ function persistSidebarHidden(hidden: boolean) {
   localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? '1' : '0');
 }
 
+function readSoundAlertsEnabled() {
+  try {
+    const raw = localStorage.getItem(SOUND_ALERTS_ENABLED_KEY);
+    if (raw === null) {
+      return true;
+    }
+    return raw !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function persistSoundAlertsEnabled(enabled: boolean) {
+  localStorage.setItem(SOUND_ALERTS_ENABLED_KEY, enabled ? '1' : '0');
+}
+
 function syncSessionOrder(sessionIds: string[], existingOrder: string[]) {
   const presentIds = new Set(sessionIds);
   const nextOrder = existingOrder.filter((id) => presentIds.has(id));
@@ -211,15 +228,7 @@ export function App() {
   const [loginError, setLoginError] = useState('');
   const [stoppedAlerts, setStoppedAlerts] = useState<StoppedSessionAlert[]>([]);
   const [liveAlerts, setLiveAlerts] = useState<Record<string, LiveSessionAlert>>({});
-  const [notificationPermission, setNotificationPermission] = useState<
-    NotificationPermission | 'unsupported'
-  >(() => {
-    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
-      return 'unsupported';
-    }
-
-    return Notification.permission;
-  });
+  const [soundAlertsEnabled, setSoundAlertsEnabled] = useState(() => readSoundAlertsEnabled());
 
   const orderRef = useRef<string[]>([]);
   const knownSessionsRef = useRef<Map<string, Session>>(new Map());
@@ -230,6 +239,7 @@ export function App() {
   const appWasHiddenRef = useRef(false);
   const expectedClosedSessionsRef = useRef<Set<string>>(new Set());
   const notificationKeysRef = useRef<Set<string>>(new Set());
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     orderRef.current = readSessionOrder();
@@ -301,25 +311,63 @@ export function App() {
   }, [checkAuth]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
-      return;
-    }
-
-    setNotificationPermission(Notification.permission);
-  }, [authenticated]);
-
-  useEffect(() => {
     if (authenticated) {
       activityCatchupPendingRef.current = true;
     }
   }, [authenticated]);
 
-  const maybeNotify = useCallback((key: string, title: string, body: string) => {
-    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
-      return;
+  useEffect(() => {
+    persistSoundAlertsEnabled(soundAlertsEnabled);
+  }, [soundAlertsEnabled]);
+
+  const ensureAudioContext = useCallback(async () => {
+    if (typeof window === 'undefined') {
+      return null;
     }
 
-    if (Notification.permission !== 'granted') {
+    const audioWindow = window as Window & { webkitAudioContext?: typeof AudioContext };
+    const Ctx = audioWindow.AudioContext || audioWindow.webkitAudioContext;
+    if (!Ctx) {
+      return null;
+    }
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new Ctx();
+    }
+
+    if (audioContextRef.current.state === 'suspended') {
+      try {
+        await audioContextRef.current.resume();
+      } catch {
+        return null;
+      }
+    }
+
+    return audioContextRef.current;
+  }, []);
+
+  const ringAlertBell = useCallback(async () => {
+    const ctx = await ensureAudioContext();
+    if (!ctx) {
+      return false;
+    }
+
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+    gainNode.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.05, ctx.currentTime + 0.015);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.16);
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.18);
+    return true;
+  }, [ensureAudioContext]);
+
+  const maybePlayAlertSound = useCallback((key: string) => {
+    if (!soundAlertsEnabled) {
       return;
     }
 
@@ -332,26 +380,22 @@ export function App() {
     }
 
     notificationKeysRef.current.add(key);
-    try {
-      new Notification(title, { body, tag: key });
-    } catch {
-      // Ignore browser notification errors.
-    }
-  }, []);
+    void ringAlertBell().then((played) => {
+      if (!played) {
+        notificationKeysRef.current.delete(key);
+      }
+    });
+  }, [ringAlertBell, soundAlertsEnabled]);
 
-  const enableNotifications = useCallback(async () => {
-    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
-      setNotificationPermission('unsupported');
-      return;
-    }
-
-    try {
-      const result = await Notification.requestPermission();
-      setNotificationPermission(result);
-    } catch {
-      setNotificationPermission(Notification.permission);
-    }
-  }, []);
+  const toggleSoundAlerts = useCallback(() => {
+    setSoundAlertsEnabled((current) => {
+      const next = !current;
+      if (next) {
+        void ringAlertBell();
+      }
+      return next;
+    });
+  }, [ringAlertBell]);
 
   const applySessions = useCallback((nextSessions: Session[]) => {
     const nextOrder = syncSessionOrder(
@@ -390,11 +434,7 @@ export function App() {
           ...alert
         });
         if (!existing) {
-          maybeNotify(
-            `stopped:${previousId}`,
-            'webtmux alert',
-            `${previousSession.name} stopped or disappeared.`
-          );
+          maybePlayAlertSound(`stopped:${previousId}`);
         }
       }
 
@@ -413,11 +453,7 @@ export function App() {
             ...alert
           });
           if (!seen && !existing) {
-            maybeNotify(
-              `exited:${session.id}`,
-              'webtmux alert',
-              `${session.name} exited.`
-            );
+            maybePlayAlertSound(`exited:${session.id}`);
           }
         } else {
           byId.delete(session.id);
@@ -510,11 +546,7 @@ export function App() {
         next[session.id] = tokenChanged ? { token } : existing;
 
         if (tokenChanged) {
-          maybeNotify(
-            `live:${session.id}:${token}`,
-            'webtmux alert',
-            `${session.name} reported terminal activity/bell.`
-          );
+          maybePlayAlertSound(`live:${session.id}:${token}`);
         }
       }
 
@@ -550,7 +582,7 @@ export function App() {
     orderRef.current = nextOrder;
     persistSessionOrder(nextOrder);
     setSessions(sortSessionsByOrder(nextSessions, nextOrder));
-  }, [activeSessionId, maybeNotify]);
+  }, [activeSessionId, maybePlayAlertSound]);
 
   const fetchSessions = useCallback(async () => {
     if (!authenticated) {
@@ -931,25 +963,27 @@ export function App() {
     setDropTargetSessionId(null);
   };
 
-  const handleSidebarResizeStart = (event: React.MouseEvent<HTMLDivElement>) => {
+  const handleSidebarResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
 
     const startX = event.clientX;
     const startWidth = sidebarWidth;
+    const pointerId = event.pointerId;
+    event.currentTarget.setPointerCapture(pointerId);
 
-    const handleMove = (moveEvent: MouseEvent) => {
+    const handleMove = (moveEvent: PointerEvent) => {
       const next = startWidth + (moveEvent.clientX - startX);
       const clamped = Math.max(220, Math.min(480, next));
       setSidebarWidth(clamped);
     };
 
     const handleUp = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
     };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp, { once: true });
   };
 
   const activeSession = sessions.find((session) => session.id === activeSessionId);
@@ -1002,12 +1036,12 @@ export function App() {
             ) : null}
           </h1>
           <div className="sidebar-header-actions">
-            {notificationPermission !== 'unsupported' &&
-            notificationPermission !== 'granted' ? (
-              <button onClick={() => enableNotifications().catch(console.error)}>
-                Notify
-              </button>
-            ) : null}
+            <button
+              onClick={toggleSoundAlerts}
+              className={!soundAlertsEnabled ? 'notify-btn-off' : ''}
+            >
+              {soundAlertsEnabled ? 'Notify On' : 'Notify Off'}
+            </button>
             <button onClick={handleCreate} disabled={busy}>
               New
             </button>
@@ -1247,27 +1281,30 @@ export function App() {
         role="separator"
         aria-orientation="vertical"
         title="Drag to resize sidebar"
-        onMouseDown={handleSidebarResizeStart}
+        onPointerDown={handleSidebarResizeStart}
       >
         <div className="sidebar-resizer-grip" />
       </div>
 
-      {sidebarHidden ? (
-        <button
-          className="sidebar-reveal-btn"
-          onClick={() => setSidebarHidden(false)}
-          title="Show session sidebar"
-        >
-          Sessions
-        </button>
-      ) : null}
-
       <main className="terminal-area">
-        {activeSession ? (
-          <TerminalPane sessionId={activeSession.id} />
-        ) : (
-          <div className="empty-state">Create a session to start.</div>
-        )}
+        {sidebarHidden ? (
+          <div className="terminal-area-header">
+            <button
+              className="sidebar-reveal-btn"
+              onClick={() => setSidebarHidden(false)}
+              title="Show session sidebar"
+            >
+              Sessions
+            </button>
+          </div>
+        ) : null}
+        <div className="terminal-content">
+          {activeSession ? (
+            <TerminalPane sessionId={activeSession.id} />
+          ) : (
+            <div className="empty-state">Create a session to start.</div>
+          )}
+        </div>
       </main>
     </div>
   );

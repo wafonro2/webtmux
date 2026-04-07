@@ -142,8 +142,9 @@ body {
 
 .sidebar-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
   margin-bottom: 12px;
   gap: 8px;
 }
@@ -190,7 +191,14 @@ body {
 .sidebar-header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  width: 100%;
+}
+
+.notify-btn-off {
+  color: #ffd4d4 !important;
+  background: rgba(127, 29, 29, 0.8) !important;
 }
 
 .logout-btn {
@@ -397,6 +405,7 @@ body {
   grid-column: 2;
   grid-row: 1;
   cursor: col-resize;
+  touch-action: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -417,10 +426,8 @@ body {
 }
 
 .sidebar-reveal-btn {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  z-index: 40;
+  position: relative;
+  z-index: 20;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 9px;
   background: rgba(10, 16, 26, 0.9);
@@ -441,6 +448,20 @@ body {
   grid-row: 1;
   padding: 12px;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.terminal-area-header {
+  display: flex;
+  align-items: center;
+  min-height: 0;
+}
+
+.terminal-content {
+  flex: 1;
   min-height: 0;
 }
 
@@ -624,12 +645,32 @@ body {
 }
 
 .terminal-keyboard {
+  --vk-scale: 1;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 10px;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: auto;
   background: rgba(10, 16, 26, 0.9);
   padding: 8px 8px 6px;
+}
+
+.terminal-keyboard-resize {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.terminal-keyboard-range {
+  flex: 1;
+  min-width: 120px;
+}
+
+.terminal-keyboard-size-label {
+  min-width: 46px;
+  text-align: right;
+  color: #b7c4dd;
+  font-size: 12px;
 }
 
 .terminal-keyboard.phone {
@@ -657,6 +698,9 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard.hg-theme-default {
+  --vk-key-width-effective: calc(var(--vk-key-width, 40px) * var(--vk-scale, 1));
+  --vk-key-height-effective: calc(var(--vk-key-height, 44px) * var(--vk-scale, 1));
+  --vk-font-size-effective: calc(var(--vk-font-size, 15px) * var(--vk-scale, 1));
   background: transparent;
   max-width: max-content;
   margin: 0 auto;
@@ -670,11 +714,11 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button {
-  flex: 0 0 var(--vk-key-width, 40px);
-  width: var(--vk-key-width, 40px);
-  min-width: var(--vk-key-width, 40px);
-  height: var(--vk-key-height, 44px);
-  font-size: var(--vk-font-size, 15px);
+  flex: 0 0 var(--vk-key-width-effective);
+  width: var(--vk-key-width-effective);
+  min-width: var(--vk-key-width-effective);
+  height: var(--vk-key-height-effective);
+  font-size: var(--vk-font-size-effective);
   background: rgba(23, 33, 52, 0.95);
   color: #dce7ff;
   border-bottom: 0;
@@ -698,22 +742,22 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-space {
-  flex-basis: calc(var(--vk-key-width, 40px) * 5.2);
-  width: calc(var(--vk-key-width, 40px) * 5.2);
-  min-width: calc(var(--vk-key-width, 40px) * 5.2);
+  flex-basis: calc(var(--vk-key-width-effective) * 5.2);
+  width: calc(var(--vk-key-width-effective) * 5.2);
+  min-width: calc(var(--vk-key-width-effective) * 5.2);
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-enter,
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-backspace {
-  flex-basis: calc(var(--vk-key-width, 40px) * 2.1);
-  width: calc(var(--vk-key-width, 40px) * 2.1);
-  min-width: calc(var(--vk-key-width, 40px) * 2.1);
+  flex-basis: calc(var(--vk-key-width-effective) * 2.1);
+  width: calc(var(--vk-key-width-effective) * 2.1);
+  min-width: calc(var(--vk-key-width-effective) * 2.1);
 }
 
 .terminal-keyboard .webtmux-keyboard .hg-button.vk-mod {
-  flex-basis: calc(var(--vk-key-width, 40px) * 1.5);
-  width: calc(var(--vk-key-width, 40px) * 1.5);
-  min-width: calc(var(--vk-key-width, 40px) * 1.5);
+  flex-basis: calc(var(--vk-key-width-effective) * 1.5);
+  width: calc(var(--vk-key-width-effective) * 1.5);
+  min-width: calc(var(--vk-key-width-effective) * 1.5);
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-tablet {
@@ -736,22 +780,22 @@ body {
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-space {
-  flex-basis: calc(var(--vk-key-width, 24px) * 4.8);
-  width: calc(var(--vk-key-width, 24px) * 4.8);
-  min-width: calc(var(--vk-key-width, 24px) * 4.8);
+  flex-basis: calc(var(--vk-key-width-effective) * 4.8);
+  width: calc(var(--vk-key-width-effective) * 4.8);
+  min-width: calc(var(--vk-key-width-effective) * 4.8);
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-enter,
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-backspace {
-  flex-basis: calc(var(--vk-key-width, 24px) * 1.6);
-  width: calc(var(--vk-key-width, 24px) * 1.6);
-  min-width: calc(var(--vk-key-width, 24px) * 1.6);
+  flex-basis: calc(var(--vk-key-width-effective) * 1.6);
+  width: calc(var(--vk-key-width-effective) * 1.6);
+  min-width: calc(var(--vk-key-width-effective) * 1.6);
 }
 
 .terminal-keyboard .webtmux-keyboard.webtmux-phone .hg-button.vk-mod {
-  flex-basis: calc(var(--vk-key-width, 24px) * 1.2);
-  width: calc(var(--vk-key-width, 24px) * 1.2);
-  min-width: calc(var(--vk-key-width, 24px) * 1.2);
+  flex-basis: calc(var(--vk-key-width-effective) * 1.2);
+  width: calc(var(--vk-key-width-effective) * 1.2);
+  min-width: calc(var(--vk-key-width-effective) * 1.2);
 }
 
 .empty-state {
@@ -797,7 +841,6 @@ body {
   }
 
   .sidebar-reveal-btn {
-    top: 14px;
-    left: 14px;
+    margin: 8px;
   }
 }

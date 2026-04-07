@@ -1,6 +1,7 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import VirtualKeyboard from './VirtualKeyboard';
 
 type TerminalPaneProps = {
   sessionId: string;
@@ -65,8 +66,11 @@ type CompiledCommandModeRule = CommandModeRule & {
 type VoiceEngine = 'browser' | 'whisper';
 
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
+const KEYBOARD_SCALE_KEY_PREFIX = 'webtmux-keyboard-scale:';
 const MIN_COLS = 20;
 const MIN_ROWS = 6;
+const PHONE_KEYBOARD_DEFAULT_SCALE = 100;
+const TABLET_KEYBOARD_DEFAULT_SCALE = 100;
 const PHONE_TERMINAL_FONT_SIZE = 8;
 const DEFAULT_TERMINAL_FONT_SIZE = 15;
 const POWERLINE_FONT_FAMILY = [
@@ -395,6 +399,43 @@ function clearStoredSize(sessionId: string) {
   localStorage.removeItem(`${TERMINAL_SIZE_KEY_PREFIX}${sessionId}`);
 }
 
+function getKeyboardScaleBounds(viewport: KeyboardViewport) {
+  return viewport === 'phone' ? { min: 70, max: 140 } : { min: 80, max: 155 };
+}
+
+function clampKeyboardScale(scale: number, viewport: KeyboardViewport) {
+  const { min, max } = getKeyboardScaleBounds(viewport);
+  return Math.max(min, Math.min(max, scale));
+}
+
+function getDefaultKeyboardScale(viewport: KeyboardViewport) {
+  const target =
+    viewport === 'phone' ? PHONE_KEYBOARD_DEFAULT_SCALE : TABLET_KEYBOARD_DEFAULT_SCALE;
+  return clampKeyboardScale(target, viewport);
+}
+
+function readStoredKeyboardScale(viewport: KeyboardViewport) {
+  try {
+    const raw = localStorage.getItem(`${KEYBOARD_SCALE_KEY_PREFIX}${viewport}`);
+    if (!raw) {
+      return getDefaultKeyboardScale(viewport);
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) {
+      return getDefaultKeyboardScale(viewport);
+    }
+
+    return clampKeyboardScale(parsed, viewport);
+  } catch {
+    return getDefaultKeyboardScale(viewport);
+  }
+}
+
+function persistKeyboardScale(viewport: KeyboardViewport, scale: number) {
+  localStorage.setItem(`${KEYBOARD_SCALE_KEY_PREFIX}${viewport}`, String(scale));
+}
+
 function toCtrlChar(value: string) {
   if (value.length !== 1) {
     return null;
@@ -481,8 +522,6 @@ function buildSymbolRows(viewport: KeyboardViewport) {
   ];
 }
 
-const VirtualKeyboard = lazy(() => import('./VirtualKeyboard'));
-
 export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -505,10 +544,19 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const speechKeepAliveRef = useRef(false);
 
   const [touchMode, setTouchMode] = useState(() => isTouchLike());
-  const [keyboardVisible, setKeyboardVisible] = useState(() => isTouchLike());
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardMode, setKeyboardMode] = useState<'abc' | 'sym'>('abc');
   const [keyboardViewport, setKeyboardViewport] = useState<KeyboardViewport>(() =>
-    typeof window !== 'undefined' && window.innerWidth <= 820 ? 'phone' : 'tablet'
+    typeof window !== 'undefined' && (isTouchLike() || window.innerWidth <= 820)
+      ? 'phone'
+      : 'tablet'
+  );
+  const [keyboardScale, setKeyboardScale] = useState(() =>
+    readStoredKeyboardScale(
+      typeof window !== 'undefined' && (isTouchLike() || window.innerWidth <= 820)
+        ? 'phone'
+        : 'tablet'
+    )
   );
   const [modifiers, setModifiers] = useState<Modifiers>({
     ctrl: false,
@@ -533,9 +581,9 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const updateTouchMode = () => {
       const next = isTouchLike();
       setTouchMode(next);
-      setKeyboardViewport(window.innerWidth <= 820 ? 'phone' : 'tablet');
-      if (next) {
-        setKeyboardVisible(true);
+      setKeyboardViewport(next || window.innerWidth <= 820 ? 'phone' : 'tablet');
+      if (!next) {
+        setKeyboardVisible(false);
       }
     };
 
@@ -546,6 +594,14 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       window.removeEventListener('resize', updateTouchMode);
     };
   }, []);
+
+  useEffect(() => {
+    setKeyboardScale(readStoredKeyboardScale(keyboardViewport));
+  }, [keyboardViewport]);
+
+  useEffect(() => {
+    setKeyboardScale((current) => clampKeyboardScale(current, keyboardViewport));
+  }, [keyboardViewport, touchMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -586,6 +642,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const term = new Terminal({
       cursorBlink: true,
       convertEol: false,
+      scrollback: 10000,
       customGlyphs: true,
       rescaleOverlappingGlyphs: true,
       fontSize: isPhoneViewport() ? PHONE_TERMINAL_FONT_SIZE : DEFAULT_TERMINAL_FONT_SIZE,
@@ -605,12 +662,6 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const helperTextarea = containerRef.current.querySelector(
       '.xterm-helper-textarea'
     ) as HTMLTextAreaElement | null;
-
-    const handleNativeFocus = () => {
-      if (isTouchLike()) {
-        helperTextarea?.blur();
-      }
-    };
 
     let activeTouchId: number | null = null;
     let touchStartX = 0;
@@ -848,7 +899,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
 
       if (!touchMoved && !movedByDistance) {
         event.preventDefault();
-        helperTextarea?.blur();
+        term.focus();
+        helperTextarea?.focus();
       }
 
       activeTouchId = null;
@@ -874,11 +926,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     };
 
     if (helperTextarea) {
-      helperTextarea.setAttribute('inputmode', 'none');
+      helperTextarea.setAttribute('inputmode', 'text');
       helperTextarea.setAttribute('autocorrect', 'off');
       helperTextarea.setAttribute('autocapitalize', 'off');
       helperTextarea.spellcheck = false;
-      helperTextarea.addEventListener('focus', handleNativeFocus);
     }
 
     containerRef.current.addEventListener('touchstart', handleTouchStart, {
@@ -1037,10 +1088,6 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     resizeObserver.observe(containerRef.current);
 
     return () => {
-      if (helperTextarea) {
-        helperTextarea.removeEventListener('focus', handleNativeFocus);
-      }
-
       clearTouchSelectionTimer();
       containerRef.current?.removeEventListener('touchstart', handleTouchStart);
       containerRef.current?.removeEventListener('touchmove', handleTouchMove);
@@ -1911,6 +1958,25 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     return themes;
   }, [capsLock, keyboardViewport, modifiers, speechListening]);
 
+  const updateKeyboardScale = (nextScale: number) => {
+    const clamped = clampKeyboardScale(nextScale, keyboardViewport);
+    setKeyboardScale(clamped);
+    persistKeyboardScale(keyboardViewport, clamped);
+  };
+
+  const adjustKeyboardScale = (delta: number) => {
+    updateKeyboardScale(keyboardScale + delta);
+  };
+
+  const keyboardScaleBounds = getKeyboardScaleBounds(keyboardViewport);
+  const keyboardScaleStyle = useMemo(
+    () =>
+      ({
+        '--vk-scale': String(keyboardScale / 100)
+      }) as CSSProperties,
+    [keyboardScale]
+  );
+
   const voiceToolbarLabel = speechListening
     ? voiceEngine === 'whisper'
       ? whisperRecording
@@ -2166,16 +2232,47 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       ) : null}
 
       {touchMode && keyboardVisible && !speechListening ? (
-        <div className={`terminal-keyboard ${keyboardViewport === 'phone' ? 'phone' : ''}`}>
-          <Suspense fallback={<div className="keyboard-loading">Loading keyboard...</div>}>
-            <VirtualKeyboard
-              rows={keyboardRows}
-              display={KEYBOARD_DISPLAY}
-              onKeyPress={onVirtualKeyPress}
-              buttonTheme={buttonTheme}
-              themeClass={keyboardViewport === 'phone' ? 'webtmux-phone' : 'webtmux-tablet'}
+        <div
+          className={`terminal-keyboard ${keyboardViewport === 'phone' ? 'phone' : ''}`}
+          style={keyboardScaleStyle}
+        >
+          <div className="terminal-keyboard-resize">
+            <button
+              type="button"
+              className="terminal-toolbar-btn"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => adjustKeyboardScale(-5)}
+            >
+              A-
+            </button>
+            <input
+              type="range"
+              min={keyboardScaleBounds.min}
+              max={keyboardScaleBounds.max}
+              value={keyboardScale}
+              className="terminal-keyboard-range"
+              aria-label="Keyboard key size"
+              onChange={(event) =>
+                updateKeyboardScale(Number.parseInt(event.target.value, 10) || keyboardScale)
+              }
             />
-          </Suspense>
+            <span className="terminal-keyboard-size-label">{keyboardScale}%</span>
+            <button
+              type="button"
+              className="terminal-toolbar-btn"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => adjustKeyboardScale(5)}
+            >
+              A+
+            </button>
+          </div>
+          <VirtualKeyboard
+            rows={keyboardRows}
+            display={KEYBOARD_DISPLAY}
+            onKeyPress={onVirtualKeyPress}
+            buttonTheme={buttonTheme}
+            themeClass={keyboardViewport === 'phone' ? 'webtmux-phone' : 'webtmux-tablet'}
+          />
         </div>
       ) : null}
     </div>
