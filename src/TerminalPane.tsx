@@ -424,13 +424,13 @@ function unwrapToken(button: string) {
 function buildAlphaRows(shift: boolean, viewport: KeyboardViewport) {
   const lastRow =
     viewport === 'phone'
-      ? '{sym} {ctrl} {alt} , . | {space} {enter}'
-      : '{sym} {ctrl} {alt} , . / | {space} {enter}';
+      ? '{sym} {ctrl} {alt} {space} {enter}'
+      : '{sym} {ctrl} {alt} / {space} {enter}';
 
   if (shift) {
     return [
       'Q W E R T Y U I O P',
-      'A S D F G H J K L',
+      '{tab} A S D F G H J K L',
       '{shift} Z X C V B N M {bksp}',
       lastRow
     ];
@@ -438,7 +438,7 @@ function buildAlphaRows(shift: boolean, viewport: KeyboardViewport) {
 
   return [
     'q w e r t y u i o p',
-    'a s d f g h j k l',
+    '{tab} a s d f g h j k l',
     '{shift} z x c v b n m {bksp}',
     lastRow
   ];
@@ -904,6 +904,25 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     ws.send(JSON.stringify({ type: 'input', data: input }));
     if (!isTouchLike()) {
       termRef.current?.focus();
+    }
+  };
+
+  const pasteFromClipboard = async () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          sendInput(text);
+          return;
+        }
+      } catch {
+        // Fallback to prompt below if clipboard read is blocked.
+      }
+    }
+
+    const manualText = window.prompt('Paste text');
+    if (manualText) {
+      sendInput(manualText);
     }
   };
 
@@ -1733,6 +1752,23 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
             onClick={() => sendAction('enter')}
           >
             Enter
+          </button>
+          <button
+            type="button"
+            className="terminal-toolbar-btn"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              pasteFromClipboard().catch(() => {});
+            }}
+            title="Paste from clipboard"
+            aria-label="Paste from clipboard"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M16 4h-1.2A3 3 0 0 0 12 2a3 3 0 0 0-2.8 2H8a2 2 0 0 0-2 2v1h2V6h2.1a2 2 0 1 0 3.8 0H16v1h2V6a2 2 0 0 0-2-2zm-4 1a1 1 0 1 1 0-2 1 1 0 0 1 0 2zM7 9h10v11H7V9zm-2 0a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9z"
+                fill="currentColor"
+              />
+            </svg>
           </button>
           <button
             type="button"
