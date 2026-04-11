@@ -958,20 +958,17 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const initialRows = manualSizeRef.current?.rows ?? term.rows;
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(
-      `${wsProtocol}://${window.location.host}/ws?sessionId=${encodeURIComponent(
-        sessionId
-      )}&cols=${initialCols}&rows=${initialRows}`
-    );
-
-    wsRef.current = ws;
+    const socketUrl = `${wsProtocol}://${window.location.host}/ws?sessionId=${encodeURIComponent(
+      sessionId
+    )}&cols=${initialCols}&rows=${initialRows}`;
 
     const sendResize = (cols: number, rows: number) => {
-      if (ws.readyState !== ws.OPEN) {
+      const socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
 
-      ws.send(
+      socket.send(
         JSON.stringify({
           type: 'resize',
           cols,
@@ -1009,39 +1006,98 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     adjustManualSizeRef.current = adjustManualSize;
     resetManualSizeRef.current = resetManualSize;
 
-    ws.addEventListener('open', () => {
-      if (manualSizeRef.current) {
-        sendResize(manualSizeRef.current.cols, manualSizeRef.current.rows);
+    let isUnmounted = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | null = null;
+    let lastSocketCloseWasUnexpected = false;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const connectSocket = () => {
+      if (isUnmounted) {
         return;
       }
-      runAutoFit();
-    });
 
-    ws.addEventListener('message', (event) => {
-      const msg = JSON.parse(event.data) as SocketMessage;
+      const socket = new WebSocket(socketUrl);
+      wsRef.current = socket;
 
-      if (msg.type === 'output') {
-        term.write(msg.data);
-      }
+      socket.addEventListener('open', () => {
+        reconnectAttempts = 0;
 
-      if (msg.type === 'exit') {
-        const codeLabel =
-          typeof msg.exitCode === 'number' ? ` with code ${msg.exitCode}` : '';
-        term.writeln('');
-        term.writeln(`[process exited${codeLabel}]`);
-      }
+        if (lastSocketCloseWasUnexpected) {
+          term.writeln('');
+          term.writeln('[reconnected]');
+          lastSocketCloseWasUnexpected = false;
+        }
 
-      if (msg.type === 'closed') {
-        term.writeln('');
-        term.writeln('[session closed]');
-      }
-    });
+        if (manualSizeRef.current) {
+          sendResize(manualSizeRef.current.cols, manualSizeRef.current.rows);
+          return;
+        }
+
+        runAutoFit();
+      });
+
+      socket.addEventListener('message', (event) => {
+        const msg = JSON.parse(event.data) as SocketMessage;
+
+        if (msg.type === 'output') {
+          term.write(msg.data);
+        }
+
+        if (msg.type === 'exit') {
+          const codeLabel =
+            typeof msg.exitCode === 'number' ? ` with code ${msg.exitCode}` : '';
+          term.writeln('');
+          term.writeln(`[process exited${codeLabel}]`);
+        }
+
+        if (msg.type === 'closed') {
+          term.writeln('');
+          term.writeln('[session closed]');
+        }
+      });
+
+      socket.addEventListener('close', (event) => {
+        if (wsRef.current === socket) {
+          wsRef.current = null;
+        }
+
+        if (isUnmounted) {
+          return;
+        }
+
+        // 1008 means the backend rejected the session/auth; avoid reconnect loops.
+        if (event.code === 1008) {
+          term.writeln('');
+          term.writeln('[connection closed by server]');
+          return;
+        }
+
+        lastSocketCloseWasUnexpected = true;
+        const delayMs = Math.min(5000, 300 * 2 ** reconnectAttempts);
+        reconnectAttempts += 1;
+        clearReconnectTimer();
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          connectSocket();
+        }, delayMs);
+      });
+    };
+
+    connectSocket();
 
     const dataSubscription = term.onData((data) => {
-      if (ws.readyState !== ws.OPEN) {
+      const socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      ws.send(JSON.stringify({ type: 'input', data }));
+      socket.send(JSON.stringify({ type: 'input', data }));
     });
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
@@ -1088,6 +1144,8 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     resizeObserver.observe(containerRef.current);
 
     return () => {
+      isUnmounted = true;
+      clearReconnectTimer();
       clearTouchSelectionTimer();
       containerRef.current?.removeEventListener('touchstart', handleTouchStart);
       containerRef.current?.removeEventListener('touchmove', handleTouchMove);
@@ -1095,7 +1153,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       containerRef.current?.removeEventListener('touchcancel', handleTouchCancel);
       resizeObserver.disconnect();
       dataSubscription.dispose();
-      ws.close();
+      wsRef.current?.close();
       term.dispose();
       wsRef.current = null;
       termRef.current = null;
