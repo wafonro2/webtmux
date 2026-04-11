@@ -209,6 +209,21 @@ function moveId(ids: string[], sourceId: string, targetId: string) {
   return next;
 }
 
+function isLikelyRenamedSession(previousSession: Session, candidate: Session) {
+  const prevTime = Date.parse(previousSession.createdAt);
+  const nextTime = Date.parse(candidate.createdAt);
+
+  if (!Number.isFinite(prevTime) || !Number.isFinite(nextTime)) {
+    return false;
+  }
+
+  if (Math.abs(prevTime - nextTime) > 1000) {
+    return false;
+  }
+
+  return previousSession.status === candidate.status;
+}
+
 export function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -238,6 +253,7 @@ export function App() {
   const activityCatchupPendingRef = useRef(true);
   const appWasHiddenRef = useRef(false);
   const expectedClosedSessionsRef = useRef<Set<string>>(new Set());
+  const pendingRenameMapRef = useRef<Map<string, string>>(new Map());
   const notificationKeysRef = useRef<Set<string>>(new Set());
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -398,16 +414,79 @@ export function App() {
   }, [ringAlertBell]);
 
   const applySessions = useCallback((nextSessions: Session[]) => {
-    const nextOrder = syncSessionOrder(
-      nextSessions.map((session) => session.id),
-      orderRef.current
-    );
+    pendingRenameMapRef.current = new Map();
 
     const previousById = knownSessionsRef.current;
     const baselinePrevious =
       previousById.size > 0 ? previousById : snapshotSessionsRef.current;
     const nextById = new Map(nextSessions.map((session) => [session.id, session]));
     const nowIso = new Date().toISOString();
+
+    const renameMatchesByOldId = new Map<string, Session>();
+    const renameIdMap = new Map<string, string>();
+    const renameCandidatePool = nextSessions.filter(
+      (session) => !baselinePrevious.has(session.id)
+    );
+
+    for (const [previousId, previousSession] of baselinePrevious.entries()) {
+      if (nextById.has(previousId)) {
+        continue;
+      }
+
+      if (expectedClosedSessionsRef.current.has(previousId)) {
+        continue;
+      }
+
+      const matchIndex = renameCandidatePool.findIndex((candidate) =>
+        isLikelyRenamedSession(previousSession, candidate)
+      );
+      if (matchIndex >= 0) {
+        const [match] = renameCandidatePool.splice(matchIndex, 1);
+        renameMatchesByOldId.set(previousId, match);
+        renameIdMap.set(previousId, match.id);
+      }
+    }
+
+    if (renameIdMap.size > 0) {
+      const nextSeenActivity = { ...seenActivityRef.current };
+      let seenActivityChanged = false;
+      const nextSeenAlertToken = { ...seenAlertTokenRef.current };
+      let seenAlertTokenChanged = false;
+
+      for (const [oldId, match] of renameMatchesByOldId.entries()) {
+        if (nextSeenActivity[oldId]) {
+          nextSeenActivity[match.id] = nextSeenActivity[oldId];
+          delete nextSeenActivity[oldId];
+          seenActivityChanged = true;
+        }
+
+        if (nextSeenAlertToken[oldId]) {
+          nextSeenAlertToken[match.id] = nextSeenAlertToken[oldId];
+          delete nextSeenAlertToken[oldId];
+          seenAlertTokenChanged = true;
+        }
+      }
+
+      if (seenActivityChanged) {
+        seenActivityRef.current = nextSeenActivity;
+        persistSeenActivityMap(nextSeenActivity);
+      }
+
+      if (seenAlertTokenChanged) {
+        seenAlertTokenRef.current = nextSeenAlertToken;
+        persistSeenAlertTokenMap(nextSeenAlertToken);
+      }
+    }
+
+    let orderSeed = orderRef.current;
+    if (renameIdMap.size > 0) {
+      orderSeed = orderSeed.map((id) => renameIdMap.get(id) ?? id);
+    }
+
+    const nextOrder = syncSessionOrder(
+      nextSessions.map((session) => session.id),
+      orderSeed
+    );
 
     setStoppedAlerts((prev) => {
       const byId = new Map(prev.map((alert) => [alert.id, alert]));
@@ -419,6 +498,10 @@ export function App() {
 
         if (expectedClosedSessionsRef.current.has(previousId)) {
           expectedClosedSessionsRef.current.delete(previousId);
+          continue;
+        }
+
+        if (renameMatchesByOldId.has(previousId)) {
           continue;
         }
 
@@ -467,6 +550,18 @@ export function App() {
 
     const allowActivityCatchup = activityCatchupPendingRef.current;
     setLiveAlerts((prev) => {
+      const prevAlerts: Record<string, LiveSessionAlert> =
+        renameMatchesByOldId.size > 0 ? { ...prev } : prev;
+
+      if (renameMatchesByOldId.size > 0) {
+        for (const [oldId, match] of renameMatchesByOldId.entries()) {
+          if (prevAlerts[oldId]) {
+            prevAlerts[match.id] = prevAlerts[oldId];
+            delete prevAlerts[oldId];
+          }
+        }
+      }
+
       const next: Record<string, LiveSessionAlert> = {};
       const nextSeenActivity = { ...seenActivityRef.current };
       const nextSeenAlertToken = { ...seenAlertTokenRef.current };
@@ -508,7 +603,7 @@ export function App() {
           tokenParts.push(`activity:${activityIso}`);
         }
         const token = tokenParts.join('|');
-        const existing = prev[session.id];
+        const existing = prevAlerts[session.id];
 
         if (session.id === activeSessionId) {
           // Opening the tab acknowledges any pending live alert.
@@ -582,6 +677,7 @@ export function App() {
     orderRef.current = nextOrder;
     persistSessionOrder(nextOrder);
     setSessions(sortSessionsByOrder(nextSessions, nextOrder));
+    pendingRenameMapRef.current = renameIdMap;
   }, [activeSessionId, maybePlayAlertSound]);
 
   const fetchSessions = useCallback(async () => {
@@ -602,16 +698,29 @@ export function App() {
     const data = await response.json();
     const nextSessions = (data.sessions as Session[]) ?? [];
     applySessions(nextSessions);
+    const renameMap = pendingRenameMapRef.current;
+    const renamedActiveId =
+      activeSessionId && renameMap.has(activeSessionId)
+        ? renameMap.get(activeSessionId) ?? null
+        : null;
+
+    if (renamedActiveId) {
+      setActiveSessionId(renamedActiveId);
+    }
 
     if (!nextSessions.length) {
       setActiveSessionId(null);
+      pendingRenameMapRef.current = new Map();
       return;
     }
 
-    if (!activeSessionId || !nextSessions.some((s) => s.id === activeSessionId)) {
+    const activeIdForLookup = renamedActiveId ?? activeSessionId;
+    if (!activeIdForLookup || !nextSessions.some((s) => s.id === activeIdForLookup)) {
       const sorted = sortSessionsByOrder(nextSessions, orderRef.current);
       setActiveSessionId(sorted[0]?.id ?? null);
     }
+
+    pendingRenameMapRef.current = new Map();
   }, [activeSessionId, applySessions, authenticated, handleUnauthorized]);
 
   useEffect(() => {
@@ -899,6 +1008,51 @@ export function App() {
       });
 
       if (updated.id !== session.id) {
+        expectedClosedSessionsRef.current.add(session.id);
+        pendingRenameMapRef.current = new Map([[session.id, updated.id]]);
+
+        const knownSession = knownSessionsRef.current.get(session.id);
+        if (knownSession) {
+          knownSessionsRef.current.delete(session.id);
+          knownSessionsRef.current.set(updated.id, updated);
+        }
+
+        const snapshotSession = snapshotSessionsRef.current.get(session.id);
+        if (snapshotSession) {
+          snapshotSessionsRef.current.delete(session.id);
+          snapshotSessionsRef.current.set(updated.id, updated);
+        }
+
+        if (seenActivityRef.current[session.id]) {
+          seenActivityRef.current = {
+            ...seenActivityRef.current,
+            [updated.id]: seenActivityRef.current[session.id]
+          };
+          delete seenActivityRef.current[session.id];
+          persistSeenActivityMap(seenActivityRef.current);
+        }
+
+        if (seenAlertTokenRef.current[session.id]) {
+          seenAlertTokenRef.current = {
+            ...seenAlertTokenRef.current,
+            [updated.id]: seenAlertTokenRef.current[session.id]
+          };
+          delete seenAlertTokenRef.current[session.id];
+          persistSeenAlertTokenMap(seenAlertTokenRef.current);
+        }
+
+        setLiveAlerts((prev) => {
+          if (!prev[session.id]) {
+            return prev;
+          }
+
+          const next = { ...prev, [updated.id]: prev[session.id] };
+          delete next[session.id];
+          return next;
+        });
+
+        setStoppedAlerts((prev) => prev.filter((alert) => alert.id !== session.id));
+
         orderRef.current = orderRef.current.map((id) =>
           id === session.id ? updated.id : id
         );
