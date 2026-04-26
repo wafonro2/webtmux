@@ -25,6 +25,7 @@ const FASTER_WHISPER_COMPUTE_TYPE = process.env.FASTER_WHISPER_COMPUTE_TYPE || '
 const FASTER_WHISPER_BEAM_SIZE = Number.parseInt(process.env.FASTER_WHISPER_BEAM_SIZE || '1', 10);
 const FASTER_WHISPER_VAD_FILTER = process.env.FASTER_WHISPER_VAD_FILTER !== '0';
 const FASTER_WHISPER_SCRIPT_PATH = path.join(__dirname, 'transcribe_faster_whisper.py');
+const FILE_UPLOAD_LIMIT = process.env.WEBTMUX_FILE_UPLOAD_LIMIT || '200mb';
 
 const configuredPassword = process.env.WEBTMUX_PASSWORD || DEFAULT_PASSWORD;
 if (!process.env.WEBTMUX_PASSWORD) {
@@ -382,6 +383,37 @@ function renameTmuxSession(sessionId, nextDisplayNameInput) {
   return renamed;
 }
 
+function getTmuxSessionCurrentPath(sessionId) {
+  if (!tmuxSessionExists(sessionId)) {
+    throw new Error('Session not found');
+  }
+
+  const currentPath = runTmux([
+    'display-message',
+    '-p',
+    '-t',
+    sessionId,
+    '#{pane_current_path}'
+  ]);
+
+  if (!currentPath) {
+    throw new Error('Failed to resolve current directory');
+  }
+
+  return currentPath;
+}
+
+function sanitizeUploadFileName(input) {
+  const raw = typeof input === 'string' ? input : '';
+  const name = path.basename(raw).replace(/[\0/\\]/g, '');
+
+  if (!name || name === '.' || name === '..') {
+    throw new Error('Invalid file name');
+  }
+
+  return name;
+}
+
 function configureTmuxSessionAlerts(sessionId) {
   // Ensure tmux emits activity and bell alerts for managed sessions.
   try {
@@ -586,6 +618,88 @@ app.patch('/api/sessions/:id', requireAuth, (req, res) => {
     }
     if (message === 'Session name cannot be empty') {
       res.status(400).json({ error: message });
+      return;
+    }
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post(
+  '/api/sessions/:id/files',
+  requireAuth,
+  express.raw({ type: ['application/octet-stream', 'application/x-webtmux-file'], limit: FILE_UPLOAD_LIMIT }),
+  async (req, res) => {
+    const sessionId = req.params.id;
+
+    if (!sessionId.startsWith(SESSION_PREFIX)) {
+      res.status(400).json({ error: 'Invalid session id' });
+      return;
+    }
+
+    const body = req.body;
+    if (!Buffer.isBuffer(body)) {
+      res.status(400).json({ error: 'File payload is required' });
+      return;
+    }
+
+    try {
+      const fileName = sanitizeUploadFileName(req.query.name);
+      const currentPath = getTmuxSessionCurrentPath(sessionId);
+      const destinationPath = path.join(currentPath, fileName);
+
+      await fs.writeFile(destinationPath, body);
+      res.status(201).json({ fileName, path: destinationPath, bytes: body.length });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'failed to upload file';
+      if (message === 'Session not found') {
+        res.status(404).json({ error: message });
+        return;
+      }
+      if (message === 'Invalid file name') {
+        res.status(400).json({ error: message });
+        return;
+      }
+      res.status(500).json({ error: message });
+    }
+  }
+);
+
+app.get('/api/sessions/:id/files', requireAuth, async (req, res) => {
+  const sessionId = req.params.id;
+
+  if (!sessionId.startsWith(SESSION_PREFIX)) {
+    res.status(400).json({ error: 'Invalid session id' });
+    return;
+  }
+
+  try {
+    const fileName = sanitizeUploadFileName(req.query.name);
+    const currentPath = getTmuxSessionCurrentPath(sessionId);
+    const filePath = path.join(currentPath, fileName);
+    const stat = await fs.stat(filePath);
+
+    if (!stat.isFile()) {
+      res.status(400).json({ error: 'Path is not a file' });
+      return;
+    }
+
+    res.download(filePath, fileName, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'failed to download file' });
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'failed to download file';
+    if (message === 'Session not found') {
+      res.status(404).json({ error: message });
+      return;
+    }
+    if (message === 'Invalid file name') {
+      res.status(400).json({ error: message });
+      return;
+    }
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+      res.status(404).json({ error: 'File not found' });
       return;
     }
     res.status(500).json({ error: message });

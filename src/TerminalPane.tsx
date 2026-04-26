@@ -524,6 +524,7 @@ function buildSymbolRows(viewport: KeyboardViewport) {
 
 export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const manualSizeRef = useRef<GridSize | null>(null);
@@ -575,6 +576,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const [whisperRecording, setWhisperRecording] = useState(false);
   const [commandModeEnabled, setCommandModeEnabled] = useState(false);
   const [commandListVisible, setCommandListVisible] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [uploadError, setUploadError] = useState('');
   const speechSupported = browserSpeechSupported || whisperConfigured;
 
   useEffect(() => {
@@ -1195,6 +1200,112 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
   };
 
+  const openFilePicker = () => {
+    setUploadStatus('');
+    setUploadError('');
+    fileInputRef.current?.click();
+  };
+
+  const uploadSelectedFiles = async (fileList: FileList | null) => {
+    const files = Array.from(fileList ?? []);
+    if (!files.length) {
+      return;
+    }
+
+    setUploadBusy(true);
+    setUploadError('');
+    setUploadStatus(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}...`);
+
+    try {
+      for (const file of files) {
+        const response = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}/files?name=${encodeURIComponent(file.name)}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/octet-stream'
+            },
+            body: await file.arrayBuffer()
+          }
+        );
+
+        if (!response.ok) {
+          let message = `Failed to upload ${file.name}`;
+          try {
+            const payload = (await response.json()) as { error?: string };
+            if (payload.error) {
+              message = payload.error;
+            }
+          } catch {
+            // Keep the generic upload error.
+          }
+          throw new Error(message);
+        }
+      }
+
+      setUploadStatus(
+        `Uploaded ${files.length} file${files.length === 1 ? '' : 's'} to current directory.`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Upload failed';
+      setUploadError(message);
+      setUploadStatus('');
+    } finally {
+      setUploadBusy(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const downloadFileFromCurrentDirectory = async () => {
+    const rawName = window.prompt('File name in current directory');
+    const fileName = rawName?.trim();
+    if (!fileName) {
+      return;
+    }
+
+    setDownloadBusy(true);
+    setUploadError('');
+    setUploadStatus(`Downloading ${fileName}...`);
+
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/files?name=${encodeURIComponent(fileName)}`
+      );
+
+      if (!response.ok) {
+        let message = `Failed to download ${fileName}`;
+        try {
+          const payload = (await response.json()) as { error?: string };
+          if (payload.error) {
+            message = payload.error;
+          }
+        } catch {
+          // Keep the generic download error.
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setUploadStatus(`Downloaded ${fileName}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Download failed';
+      setUploadError(message);
+      setUploadStatus('');
+    } finally {
+      setDownloadBusy(false);
+    }
+  };
+
   const copySelection = async () => {
     const selected = termRef.current?.getSelection() ?? '';
     if (!selected) {
@@ -1780,6 +1891,10 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     setCommandListVisible(false);
     setWhisperRecording(false);
     setWhisperBusy(false);
+    setUploadBusy(false);
+    setDownloadBusy(false);
+    setUploadStatus('');
+    setUploadError('');
     speechCommittedSegmentsRef.current = [];
     speechFinalByIndexRef.current = new Map();
     releaseSpeechRecognition(true);
@@ -2051,8 +2166,43 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     <div className="terminal-frame">
       <div ref={containerRef} className="terminal-pane" />
 
-      {touchMode ? (
-        <div className="terminal-toolbar">
+      <input
+        ref={fileInputRef}
+        className="terminal-file-input"
+        type="file"
+        multiple
+        onChange={(event) => {
+          uploadSelectedFiles(event.currentTarget.files).catch(() => {});
+        }}
+      />
+
+      <div className="terminal-toolbar">
+        <button
+          type="button"
+          className="terminal-toolbar-btn"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={openFilePicker}
+          title="Upload files to the current terminal directory"
+          aria-label="Upload files to current directory"
+          disabled={uploadBusy}
+        >
+          {uploadBusy ? 'Uploading...' : 'Upload'}
+        </button>
+        <button
+          type="button"
+          className="terminal-toolbar-btn"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            downloadFileFromCurrentDirectory().catch(() => {});
+          }}
+          title="Download a file from the current terminal directory"
+          aria-label="Download file from current directory"
+          disabled={downloadBusy}
+        >
+          {downloadBusy ? 'Downloading...' : 'Download'}
+        </button>
+        {touchMode ? (
+          <>
           <button
             type="button"
             className="terminal-toolbar-btn"
@@ -2155,6 +2305,13 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
               )}
             </button>
           ) : null}
+          </>
+        ) : null}
+      </div>
+
+      {uploadStatus || uploadError ? (
+        <div className={`terminal-upload-status ${uploadError ? 'error' : ''}`}>
+          {uploadError || uploadStatus}
         </div>
       ) : null}
 

@@ -499,6 +499,10 @@ body {
   justify-content: flex-end;
 }
 
+.terminal-file-input {
+  display: none;
+}
+
 .terminal-toolbar-btn {
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
@@ -531,6 +535,15 @@ body {
   border-color: rgba(125, 211, 252, 0.75);
   background: rgba(14, 116, 144, 0.7);
   color: #e0f2fe;
+}
+
+.terminal-upload-status {
+  color: #bfdbfe;
+  font-size: 12px;
+}
+
+.terminal-upload-status.error {
+  color: #fecaca;
 }
 
 .terminal-speech-error {
