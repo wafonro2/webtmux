@@ -546,6 +546,115 @@ body {
   color: #fecaca;
 }
 
+.terminal-download-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(2, 6, 12, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.terminal-download-modal {
+  width: min(620px, 100%);
+  max-height: min(680px, 86vh);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 14px;
+  background: rgba(8, 13, 21, 0.98);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.terminal-download-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.terminal-download-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.terminal-download-header p {
+  margin: 4px 0 0;
+  color: #93a7c7;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.terminal-download-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.terminal-download-error {
+  color: #fecaca;
+  font-size: 13px;
+}
+
+.terminal-download-list {
+  min-height: 90px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.terminal-download-empty {
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  padding: 18px;
+  text-align: center;
+  color: #93a7c7;
+  font-size: 13px;
+}
+
+.terminal-download-item {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #dce7ff;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.terminal-download-item:hover:not(:disabled) {
+  border-color: rgba(125, 211, 252, 0.55);
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.terminal-download-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.terminal-download-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.terminal-download-meta {
+  color: #93a7c7;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .terminal-speech-error {
   color: #fecaca;
   font-size: 12px;

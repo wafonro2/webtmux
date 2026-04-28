@@ -64,6 +64,11 @@ type CompiledCommandModeRule = CommandModeRule & {
   maxWords: number;
 };
 type VoiceEngine = 'browser' | 'whisper';
+type CurrentDirectoryFile = {
+  name: string;
+  size: number;
+  modifiedAt: string;
+};
 
 const TERMINAL_SIZE_KEY_PREFIX = 'webtmux-terminal-size:';
 const KEYBOARD_SCALE_KEY_PREFIX = 'webtmux-keyboard-scale:';
@@ -436,6 +441,27 @@ function persistKeyboardScale(viewport: KeyboardViewport, scale: number) {
   localStorage.setItem(`${KEYBOARD_SCALE_KEY_PREFIX}${viewport}`, String(scale));
 }
 
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '';
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${units[unitIndex]}`;
+}
+
 function toCtrlChar(value: string) {
   if (value.length !== 1) {
     return null;
@@ -578,6 +604,11 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
   const [commandListVisible, setCommandListVisible] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadListBusy, setDownloadListBusy] = useState(false);
+  const [downloadFiles, setDownloadFiles] = useState<CurrentDirectoryFile[]>([]);
+  const [downloadDirectory, setDownloadDirectory] = useState('');
+  const [downloadListError, setDownloadListError] = useState('');
   const [uploadStatus, setUploadStatus] = useState('');
   const [uploadError, setUploadError] = useState('');
   const speechSupported = browserSpeechSupported || whisperConfigured;
@@ -1258,9 +1289,57 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     }
   };
 
-  const downloadFileFromCurrentDirectory = async () => {
-    const rawName = window.prompt('File name in current directory');
-    const fileName = rawName?.trim();
+  const loadDownloadFiles = async () => {
+    setDownloadListBusy(true);
+    setDownloadListError('');
+
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files`);
+
+      if (!response.ok) {
+        let message = 'Failed to list files';
+        try {
+          const payload = (await response.json()) as { error?: string };
+          if (payload.error) {
+            message = payload.error;
+          }
+        } catch {
+          // Keep the generic list error.
+        }
+        throw new Error(message);
+      }
+
+      const payload = (await response.json()) as {
+        path?: string;
+        files?: CurrentDirectoryFile[];
+      };
+      setDownloadDirectory(typeof payload.path === 'string' ? payload.path : '');
+      setDownloadFiles(Array.isArray(payload.files) ? payload.files : []);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to list files';
+      setDownloadListError(message);
+      setDownloadFiles([]);
+    } finally {
+      setDownloadListBusy(false);
+    }
+  };
+
+  const openDownloadModal = async () => {
+    setDownloadModalOpen(true);
+    setUploadStatus('');
+    setUploadError('');
+    await loadDownloadFiles();
+  };
+
+  const closeDownloadModal = () => {
+    if (downloadBusy) {
+      return;
+    }
+
+    setDownloadModalOpen(false);
+  };
+
+  const downloadFileFromCurrentDirectory = async (fileName: string) => {
     if (!fileName) {
       return;
     }
@@ -1893,6 +1972,11 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     setWhisperBusy(false);
     setUploadBusy(false);
     setDownloadBusy(false);
+    setDownloadModalOpen(false);
+    setDownloadListBusy(false);
+    setDownloadFiles([]);
+    setDownloadDirectory('');
+    setDownloadListError('');
     setUploadStatus('');
     setUploadError('');
     speechCommittedSegmentsRef.current = [];
@@ -2193,13 +2277,13 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
           className="terminal-toolbar-btn"
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => {
-            downloadFileFromCurrentDirectory().catch(() => {});
+            openDownloadModal().catch(() => {});
           }}
           title="Download a file from the current terminal directory"
           aria-label="Download file from current directory"
-          disabled={downloadBusy}
+          disabled={downloadBusy || downloadListBusy}
         >
-          {downloadBusy ? 'Downloading...' : 'Download'}
+          {downloadBusy ? 'Downloading...' : downloadListBusy ? 'Loading...' : 'Download'}
         </button>
         {touchMode ? (
           <>
@@ -2312,6 +2396,71 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       {uploadStatus || uploadError ? (
         <div className={`terminal-upload-status ${uploadError ? 'error' : ''}`}>
           {uploadError || uploadStatus}
+        </div>
+      ) : null}
+
+      {downloadModalOpen ? (
+        <div className="terminal-download-modal-backdrop" onMouseDown={closeDownloadModal}>
+          <div
+            className="terminal-download-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="terminal-download-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="terminal-download-header">
+              <div>
+                <h2 id="terminal-download-title">Download File</h2>
+                <p>{downloadDirectory || 'Current terminal directory'}</p>
+              </div>
+              <button
+                type="button"
+                className="terminal-toolbar-btn"
+                onClick={closeDownloadModal}
+                disabled={downloadBusy}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="terminal-download-actions">
+              <button
+                type="button"
+                className="terminal-toolbar-btn"
+                onClick={() => loadDownloadFiles().catch(() => {})}
+                disabled={downloadListBusy || downloadBusy}
+              >
+                {downloadListBusy ? 'Refreshing...' : 'Refresh'}
+              </button>
+            </div>
+
+            {downloadListError ? (
+              <div className="terminal-download-error">{downloadListError}</div>
+            ) : null}
+
+            <div className="terminal-download-list">
+              {downloadListBusy && !downloadFiles.length ? (
+                <div className="terminal-download-empty">Loading files...</div>
+              ) : null}
+              {!downloadListBusy && !downloadListError && !downloadFiles.length ? (
+                <div className="terminal-download-empty">No files in this directory.</div>
+              ) : null}
+              {downloadFiles.map((file) => (
+                <button
+                  key={file.name}
+                  type="button"
+                  className="terminal-download-item"
+                  onClick={() => downloadFileFromCurrentDirectory(file.name).catch(() => {})}
+                  disabled={downloadBusy}
+                >
+                  <span className="terminal-download-name">{file.name}</span>
+                  <span className="terminal-download-meta">
+                    {formatFileSize(file.size)} - {new Date(file.modifiedAt).toLocaleString()}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       ) : null}
 

@@ -414,6 +414,28 @@ function sanitizeUploadFileName(input) {
   return name;
 }
 
+async function listCurrentDirectoryFiles(currentPath) {
+  const entries = await fs.readdir(currentPath, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const filePath = path.join(currentPath, entry.name);
+    const stat = await fs.stat(filePath);
+    files.push({
+      name: entry.name,
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString()
+    });
+  }
+
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  return files;
+}
+
 function configureTmuxSessionAlerts(sessionId) {
   // Ensure tmux emits activity and bell alerts for managed sessions.
   try {
@@ -673,8 +695,15 @@ app.get('/api/sessions/:id/files', requireAuth, async (req, res) => {
   }
 
   try {
-    const fileName = sanitizeUploadFileName(req.query.name);
     const currentPath = getTmuxSessionCurrentPath(sessionId);
+
+    if (typeof req.query.name === 'undefined') {
+      const files = await listCurrentDirectoryFiles(currentPath);
+      res.json({ path: currentPath, files });
+      return;
+    }
+
+    const fileName = sanitizeUploadFileName(req.query.name);
     const filePath = path.join(currentPath, fileName);
     const stat = await fs.stat(filePath);
 
