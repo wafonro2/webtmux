@@ -8,6 +8,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_USER="${WEBTMUX_USER:-${SUDO_USER:-$USER}}"
 PORT="${WEBTMUX_PORT:-3001}"
 RUN_USER_SHELL="$(getent passwd "${RUN_USER}" | cut -d: -f7 || true)"
+RUN_USER_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6 || true)"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo/root: sudo ./scripts/install-systemd.sh" >&2
@@ -46,6 +47,62 @@ read_required_node_major() {
   echo "${default_major}"
 }
 
+read_asdf_node_version() {
+  local tool_versions
+  for tool_versions in "${APP_DIR}/.tool-versions" "${RUN_USER_HOME}/.tool-versions"; do
+    if [[ -f "${tool_versions}" ]]; then
+      local version
+      version="$(awk '$1 == "nodejs" { print $2; exit }' "${tool_versions}")"
+      if [[ -n "${version}" ]]; then
+        echo "${version}"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+find_asdf_node_bin() {
+  local binary_name="$1"
+
+  if [[ "${binary_name}" != "node" && "${binary_name}" != "npm" ]]; then
+    return 1
+  fi
+  if [[ -z "${RUN_USER_HOME}" || ! -d "${RUN_USER_HOME}/.asdf/installs/nodejs" ]]; then
+    return 1
+  fi
+
+  local version
+  version="${WEBTMUX_NODE_VERSION:-$(read_asdf_node_version || true)}"
+  if [[ -n "${version}" ]]; then
+    local versioned_candidate="${RUN_USER_HOME}/.asdf/installs/nodejs/${version}/bin/${binary_name}"
+    if [[ -x "${versioned_candidate}" ]]; then
+      echo "${versioned_candidate}"
+      return 0
+    fi
+  fi
+
+  local required_major
+  required_major="$(read_required_node_major)"
+
+  local candidate
+  for candidate in "${RUN_USER_HOME}"/.asdf/installs/nodejs/*/bin/"${binary_name}"; do
+    [[ -e "${candidate}" ]] || continue
+
+    local node_candidate
+    node_candidate="$(dirname "${candidate}")/node"
+    local node_major
+    node_major="$("${node_candidate}" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+    if [[ -n "${node_major}" && "${node_major}" -ge "${required_major}" && -x "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 find_user_bin() {
   local binary_name="$1"
   local override_path="$2"
@@ -66,6 +123,12 @@ find_user_bin() {
     return 0
   fi
 
+  detected="$(find_asdf_node_bin "${binary_name}" || true)"
+  if [[ -n "${detected}" && -x "${detected}" ]]; then
+    echo "${detected}"
+    return 0
+  fi
+
   return 1
 }
 
@@ -79,7 +142,7 @@ if [[ -z "${NODE_BIN}" || -z "${NPM_BIN}" || -z "${TMUX_BIN}" ]]; then
   echo "  node: ${NODE_BIN:-<missing>}" >&2
   echo "  npm : ${NPM_BIN:-<missing>}" >&2
   echo "  tmux: ${TMUX_BIN:-<missing>}" >&2
-  echo "If node/npm come from nvm, ensure they are available in the user's login shell," >&2
+  echo "If node/npm come from nvm/asdf, ensure they are available in the user's login shell," >&2
   echo "or pass explicit paths via WEBTMUX_NODE_BIN and WEBTMUX_NPM_BIN." >&2
   exit 1
 fi
